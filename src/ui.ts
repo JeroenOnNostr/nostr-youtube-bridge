@@ -551,7 +551,7 @@ function fmtBackfillProgress(run) {
 async function backfillAll(channelId, btn) {
   const ok = confirm(
     'Backfill all videos for ' + channelId + '?\\n\\n' +
-    'This walks YouTube\\'s internal API to enumerate every video on the channel and ' +
+    'This walks the YouTube internal API to enumerate every video on the channel and ' +
     'publishes a Nostr event for each one not already published.\\n\\n' +
     'Caveats:\\n' +
     '  • Descriptions will be empty (RSS gives descriptions only for the most recent ~15).\\n' +

@@ -154,14 +154,30 @@ export function buildFollowPackEvent(input: FollowPackInput): EventTemplate {
  * that accepted it. Failure on any single relay is logged and ignored — the
  * goal is best-effort fan-out.
  */
+/** Hard upper bound on a single relay handshake-or-publish step. Without this
+ *  a hung relay (e.g. unreachable from Cloudflare egress) can stall an entire
+ *  long-running backfill, since nostr-tools' Relay.connect await never
+ *  resolves on a silently-dropped TCP. */
+const RELAY_OP_TIMEOUT_MS = 8000;
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`timeout after ${ms}ms: ${label}`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
 export async function publishToRelays(event: NostrEvent, relayUrls: string[]): Promise<number> {
   let accepted = 0;
   await Promise.all(
     relayUrls.map(async (url) => {
       let relay: Relay | null = null;
       try {
-        relay = await Relay.connect(url);
-        await relay.publish(event);
+        relay = await withTimeout(Relay.connect(url), RELAY_OP_TIMEOUT_MS, `${url} connect`);
+        await withTimeout(relay.publish(event), RELAY_OP_TIMEOUT_MS, `${url} publish`);
         accepted++;
       } catch (err) {
         console.warn(`relay ${url} rejected event ${event.id}:`, err);
