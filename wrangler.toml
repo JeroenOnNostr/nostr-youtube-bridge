@@ -1,0 +1,27 @@
+name = "nostr-youtube-bridge"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Cron: every 15 minutes
+[triggers]
+crons = ["*/15 * * * *"]
+
+# KV namespaces — create with: wrangler kv namespace create CHANNELS / PUBLISHED
+# Then paste the ids here.
+[[kv_namespaces]]
+binding = "CHANNELS"
+id = "REPLACE_WITH_CHANNELS_KV_ID"
+
+[[kv_namespaces]]
+binding = "PUBLISHED"
+id = "REPLACE_WITH_PUBLISHED_KV_ID"
+
+[vars]
+RELAY_URLS = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
+SHORTS_KIND = "22"
+BACKFILL_PER_FEED = "5"
+
+# Secrets (set with: wrangler secret put <NAME>):
+# - BRIDGE_MASTER_SEED   (32-byte hex)
+# - ADMIN_TOKEN          (bearer token for /admin/channels)

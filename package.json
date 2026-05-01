@@ -1,0 +1,25 @@
+{
+  "name": "nostr-youtube-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that bridges YouTube channels into Nostr as per-channel npubs publishing NIP-71 video events.",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.5.0",
+    "@noble/secp256k1": "^2.1.0",
+    "fast-xml-parser": "^4.5.0",
+    "nostr-tools": "^2.10.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "wrangler": "^3.95.0"
+  }
+}
