@@ -96,6 +96,50 @@ export function signEvent(template: EventTemplate, sk: Uint8Array): NostrEvent {
   return finalizeEvent(template, sk);
 }
 
+export interface FollowPackChannel {
+  pubkeyHex: string;
+  channelId: string;
+  petname?: string;
+}
+
+export interface FollowPackInput {
+  channels: FollowPackChannel[];
+  name: string;
+  description?: string;
+  /** Stable identifier for this addressable kind:39089 event. */
+  dTag: string;
+  /** Optional relay hint embedded in each `p` tag. */
+  defaultRelay?: string;
+}
+
+/**
+ * Build an unsigned NIP-51 follow pack (kind 39089). The signing key is
+ * supplied by the caller — typically the user's existing Nostr identity via
+ * NIP-46, signed in the browser. The Worker never sees that key.
+ */
+export function buildFollowPackEvent(input: FollowPackInput): EventTemplate {
+  const tags: string[][] = [
+    ['d', input.dTag],
+    ['title', input.name],
+  ];
+  if (input.description) tags.push(['description', input.description]);
+  for (const ch of input.channels) {
+    const tag = ['p', ch.pubkeyHex];
+    if (input.defaultRelay) tag.push(input.defaultRelay);
+    if (ch.petname) {
+      if (!input.defaultRelay) tag.push('');
+      tag.push(ch.petname);
+    }
+    tags.push(tag);
+  }
+  return {
+    kind: 39089,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content: '',
+  };
+}
+
 /**
  * Publish a signed event to all configured relays. Returns the count of relays
  * that accepted it. Failure on any single relay is logged and ignored — the

@@ -17,8 +17,12 @@ id = "e40c1d240cec4c4c80a876dfc40a36b5"
 binding = "PUBLISHED"
 id = "f19e7f1bbb2b4d7eabcf8847cf49a313"
 
+[[kv_namespaces]]
+binding = "EVENTS"
+id = "3d9ae73b573e40768bf565d0ce0739df"
+
 [vars]
-RELAY_URLS = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
+RELAY_URLS = "wss://relay.kubo.watch,wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
 SHORTS_KIND = "22"
 BACKFILL_PER_FEED = "5"
 
