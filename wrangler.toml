@@ -11,11 +11,11 @@ crons = ["*/15 * * * *"]
 # Then paste the ids here.
 [[kv_namespaces]]
 binding = "CHANNELS"
-id = "REPLACE_WITH_CHANNELS_KV_ID"
+id = "e40c1d240cec4c4c80a876dfc40a36b5"
 
 [[kv_namespaces]]
 binding = "PUBLISHED"
-id = "REPLACE_WITH_PUBLISHED_KV_ID"
+id = "f19e7f1bbb2b4d7eabcf8847cf49a313"
 
 [vars]
 RELAY_URLS = "wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
