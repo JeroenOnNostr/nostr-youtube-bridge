@@ -36,7 +36,6 @@ export function buildKind0(meta: ChannelMetadata): EventTemplate {
     created_at: Math.floor(Date.now() / 1000),
     tags: [
       ['i', `youtube:${meta.id}`, '-'],
-      ['t', 'bridged'],
     ],
     content: JSON.stringify(cleaned),
   };
@@ -61,7 +60,6 @@ export interface VideoEventInput {
 }
 
 export function buildVideoEvent({ entry, classification, shortsKind }: VideoEventInput): EventTemplate {
-  const isShort = classification === 'short';
   const kind = classification === 'long' ? 21 : shortsKind;
 
   const tags: string[][] = [];
@@ -75,10 +73,7 @@ export function buildVideoEvent({ entry, classification, shortsKind }: VideoEven
     ['title', entry.title],
     ['published_at', String(entry.publishedAtUnix)],
     ['alt', `Video: ${entry.title}`],
-    ['t', 'youtube'],
-    ['t', 'bridged'],
   );
-  if (isShort) tags.push(['t', 'short']);
   tags.push(['r', entry.watchUrl]);
   tags.push([
     'imeta',

@@ -58,7 +58,11 @@ function parseFeed(xml: string, sourceKind: FeedKind): FeedEntry[] {
   const feed = parsed?.feed;
   if (!feed) return [];
 
-  const channelId: string = feed['yt:channelId'] ?? '';
+  // The regular feed's <yt:channelId> drops the leading "UC" prefix; the
+  // entry-level <yt:channelId> includes it. Read from an entry when possible
+  // and fall back to re-prefixing the feed-level value.
+  const rawFeedChannelId: string = feed['yt:channelId'] ?? '';
+  const feedChannelId = rawFeedChannelId.startsWith('UC') ? rawFeedChannelId : 'UC' + rawFeedChannelId;
   const channelTitle: string = feed.title ?? '';
   // The feed's <author><name> is the channel name; <link rel="alternate"> is the channel URL.
   const authorName: string = feed.author?.name ?? channelTitle;
@@ -87,11 +91,14 @@ function parseFeed(xml: string, sourceKind: FeedKind): FeedEntry[] {
     const description: string = e['media:group']?.['media:description'] ?? '';
     const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
+    // Entry-level channelId always has the UC prefix; prefer it.
+    const entryChannelId: string = e['yt:channelId'] ?? feedChannelId;
+
     out.push({
       videoId,
-      channelId,
+      channelId: entryChannelId,
       channelTitle,
-      channelUrl: channelUrl || `https://www.youtube.com/channel/${channelId}`,
+      channelUrl: channelUrl || `https://www.youtube.com/channel/${entryChannelId}`,
       authorName,
       title,
       description,
@@ -139,6 +146,10 @@ export interface ChannelFeeds {
  * classification. The regular feed is used to detect entries that are missing
  * from both split feeds (e.g. if YouTube retires the UULF/UUSH prefixes) so the
  * caller can fall back to the redirect probe.
+ *
+ * Channel metadata (title, url) is sourced from the *regular* feed only —
+ * UULF/UUSH split feeds title themselves "Videos" / "Short videos", which is
+ * not the channel name.
  */
 export async function fetchChannelFeeds(channelId: string): Promise<ChannelFeeds> {
   const [longEntries, shortEntries, regularEntries] = await Promise.all([
@@ -152,12 +163,14 @@ export async function fetchChannelFeeds(channelId: string): Promise<ChannelFeeds
   for (const e of shortEntries) known.add(e.videoId);
   const unclassified = regularEntries.filter((e) => !known.has(e.videoId));
 
-  // Pull channel info from whichever feed responded.
-  const src = longEntries[0] ?? shortEntries[0] ?? regularEntries[0];
+  // Channel info: prefer the regular feed; only fall back to a split feed
+  // entry if the regular feed didn't return anything. Use authorName (which
+  // comes from <author><name>) — it is the actual channel name in all feeds.
+  const src = regularEntries[0] ?? longEntries[0] ?? shortEntries[0];
   const channelInfo = src
     ? {
         id: src.channelId || channelId,
-        title: src.channelTitle,
+        title: src.authorName || src.channelTitle,
         url: src.channelUrl,
         authorName: src.authorName,
       }
