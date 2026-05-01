@@ -66,7 +66,7 @@ export const INDEX_HTML = String.raw`<!doctype html>
   .pill.dup { background: rgba(154,163,178,.15); color: var(--muted); }
   .npub { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
   pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow: auto; font-size: 12px; }
-  .toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel); border: 1px solid var(--border); padding: 12px 16px; border-radius: 8px; max-width: 360px; }
+  .toast { position: fixed; bottom: 16px; right: 16px; background: var(--panel); border: 1px solid var(--border); padding: 12px 16px; border-radius: 8px; max-width: 360px; white-space: pre-line; }
   .toast.error { border-color: var(--bad); }
   .toast.ok { border-color: var(--ok); }
   .relay-list { display: flex; flex-direction: column; gap: 4px; }
@@ -524,6 +524,30 @@ async function publishNow(channelId, btn) {
   }
 }
 
+function fmtBackfillProgress(run) {
+  const phaseLabel = {
+    'starting': 'starting',
+    'innertube-videos': 'fetching videos tab',
+    'innertube-shorts': 'fetching shorts tab',
+    'publishing-videos': 'publishing videos',
+    'publishing-shorts': 'publishing shorts',
+    'done': 'done',
+  }[run.phase] || run.phase;
+  const totalSeen = (run.longSeen || 0) + (run.shortSeen || 0);
+  const totalPublished = (run.longPublished || 0) + (run.shortPublished || 0);
+  const denom = totalSeen > 0 ? totalSeen : '?';
+  const lines = [
+    'Backfilling ' + run.channelId + ' — ' + phaseLabel,
+    'Published: ' + totalPublished + ' / ' + denom + ' (' +
+      (run.longPublished || 0) + ' long, ' +
+      (run.shortPublished || 0) + ' short, ' +
+      (run.alreadyPublished || 0) + ' skipped, ' +
+      (run.errors || 0) + ' errors)',
+  ];
+  if (run.lastVideoTitle) lines.push('Last: ' + run.lastVideoTitle.slice(0, 60));
+  return lines.join('\\n');
+}
+
 async function backfillAll(channelId, btn) {
   const ok = confirm(
     'Backfill all videos for ' + channelId + '?\\n\\n' +
@@ -538,29 +562,63 @@ async function backfillAll(channelId, btn) {
   if (!ok) return;
   const originalLabel = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = 'Backfilling…'; }
-  toast('backfilling ' + channelId + ' — this can take several minutes for large channels…', '', { sticky: true });
+
+  let runId;
   try {
-    const r = await api('/admin/channels/' + channelId + '/backfill', {
+    const kickoff = await api('/admin/channels/' + channelId + '/backfill', {
       method: 'POST',
       body: JSON.stringify({}),
     });
-    if (r.ok) {
-      toast(
-        'backfill done: scanned ' + (r.longSeen + r.shortSeen) +
-        ' (' + r.longSeen + ' long + ' + r.shortSeen + ' short), +' +
-        r.longPublished + ' long / +' + r.shortPublished + ' short / ' +
-        r.alreadyPublished + ' skipped / ' + r.errors + ' errors',
-        'ok',
-      );
-    } else {
-      toast('backfill aborted in ' + r.phase + ': ' + r.abortReason, 'error');
+    if (!kickoff.ok || !kickoff.runId) {
+      toast('backfill failed to start: ' + (kickoff.error || 'unknown'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+      return;
     }
-    loadChannels();
+    runId = kickoff.runId;
   } catch (e) {
-    toast('backfill failed: ' + e.message, 'error');
-  } finally {
+    toast('backfill failed to start: ' + e.message, 'error');
     if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+    return;
   }
+
+  toast('Backfilling ' + channelId + ' — starting…', '', { sticky: true });
+
+  // Poll the run until status is terminal. Bail out after 60 minutes of
+  // polling as a defensive safety net.
+  const pollStart = Date.now();
+  const maxPollMs = 60 * 60 * 1000;
+  let lastStatus = 'running';
+  while (Date.now() - pollStart < maxPollMs) {
+    await new Promise((r) => setTimeout(r, 2000));
+    let s;
+    try {
+      s = await api('/admin/backfill/' + runId);
+    } catch (e) {
+      // Transient errors shouldn't kill polling; keep going.
+      continue;
+    }
+    if (!s.ok || !s.run) continue;
+    const run = s.run;
+    toast(fmtBackfillProgress(run), run.status === 'aborted' ? 'error' : '', { sticky: true });
+    if (run.status === 'done' || run.status === 'aborted') {
+      lastStatus = run.status;
+      if (run.status === 'done') {
+        toast(
+          'Backfill done: +' + run.longPublished + ' long / +' + run.shortPublished + ' short / ' +
+          run.alreadyPublished + ' skipped / ' + run.errors + ' errors',
+          'ok',
+        );
+      } else {
+        toast('Backfill aborted in ' + run.phase + ': ' + (run.abortReason || 'unknown'), 'error');
+      }
+      break;
+    }
+  }
+  if (lastStatus === 'running') {
+    toast('Backfill still running after 60 min — check archive stats', 'error');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+  loadChannels();
 }
 
 async function deleteChannel(channelId) {

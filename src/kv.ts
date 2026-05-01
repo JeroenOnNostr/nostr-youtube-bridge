@@ -250,3 +250,48 @@ export class InnertubeContextStore {
     await this.kv.put(INNERTUBE_CONTEXT_KEY, JSON.stringify(ctx));
   }
 }
+
+/**
+ * Per-run progress record for a long-running backfill. The handler returns
+ * immediately with a runId; the worker continues via ctx.waitUntil and
+ * updates this record as it walks the channel. The dashboard polls
+ * GET /admin/backfill/:runId until status === 'done' or 'aborted'.
+ */
+export interface BackfillRun {
+  runId: string;
+  channelId: string;
+  startedAt: number;
+  updatedAt: number;
+  status: 'running' | 'done' | 'aborted';
+  phase: 'starting' | 'innertube-videos' | 'innertube-shorts' | 'publishing-videos' | 'publishing-shorts' | 'done';
+  longSeen: number;
+  shortSeen: number;
+  longPublished: number;
+  shortPublished: number;
+  alreadyPublished: number;
+  errors: number;
+  abortReason?: string;
+  /** Most recently published videoId, useful for the dashboard's live ticker. */
+  lastVideoId?: string;
+  lastVideoTitle?: string;
+}
+
+const BACKFILL_PREFIX = 'backfill:';
+
+export class BackfillRunStore {
+  constructor(private kv: KVNamespace) {}
+
+  async get(runId: string): Promise<BackfillRun | null> {
+    return this.kv.get<BackfillRun>(BACKFILL_PREFIX + runId, 'json');
+  }
+
+  /**
+   * Persist run state. Records get a 24h TTL so the bucket doesn't accrete
+   * stale rows; the dashboard polls within seconds, so the TTL is generous.
+   */
+  async put(run: BackfillRun): Promise<void> {
+    await this.kv.put(BACKFILL_PREFIX + run.runId, JSON.stringify(run), {
+      expirationTtl: 24 * 60 * 60,
+    });
+  }
+}

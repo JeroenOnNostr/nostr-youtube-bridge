@@ -1,5 +1,5 @@
 import { deriveChannelKey } from './derive';
-import { ChannelStore, EventStore, InnertubeContextStore, PublishedStore, type ArchivedEvent, type ChannelRecord, type PublishedRecord } from './kv';
+import { BackfillRunStore, ChannelStore, EventStore, InnertubeContextStore, PublishedStore, type ArchivedEvent, type BackfillRun, type ChannelRecord, type PublishedRecord } from './kv';
 import { enumerateChannelTab, getInnertubeContext, type InnertubeEntry } from './innertube';
 import {
   buildFollowPackEvent,
@@ -587,7 +587,172 @@ function feedEntryFromInnertube(ie: InnertubeEntry, channelId: string): FeedEntr
   };
 }
 
-async function handleAdminBackfillChannel(channelId: string, req: Request, env: Env): Promise<Response> {
+/**
+ * Generate a runId. Sortable by time (lexicographically) so dashboards
+ * scanning runs see newest-first when prefix-listed if we ever add that.
+ */
+function newRunId(): string {
+  const now = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${now}-${rand}`;
+}
+
+/**
+ * Background worker: walk the channel and publish, updating the run record
+ * in KV as we go. Lives behind ctx.waitUntil so the HTTP response returns
+ * immediately. Robust to any single-event failure — keeps going.
+ */
+async function runBackfill(env: Env, runId: string, channelId: string, maxEntries: number): Promise<void> {
+  const channels = new ChannelStore(env.CHANNELS);
+  const published = new PublishedStore(env.PUBLISHED);
+  const archive = new EventStore(env.EVENTS);
+  const itStore = new InnertubeContextStore(env.CHANNELS);
+  const runs = new BackfillRunStore(env.CHANNELS);
+
+  // Snapshot helper: read current run from local state and persist. We avoid
+  // re-reading from KV between writes because the only writer for this runId
+  // is this function.
+  const run: BackfillRun = {
+    runId,
+    channelId,
+    startedAt: Math.floor(Date.now() / 1000),
+    updatedAt: Math.floor(Date.now() / 1000),
+    status: 'running',
+    phase: 'starting',
+    longSeen: 0,
+    shortSeen: 0,
+    longPublished: 0,
+    shortPublished: 0,
+    alreadyPublished: 0,
+    errors: 0,
+  };
+  const persist = async () => {
+    run.updatedAt = Math.floor(Date.now() / 1000);
+    await runs.put(run);
+  };
+  await persist();
+
+  // Channel must exist; otherwise we have no derived nsec to sign with.
+  const existing = await channels.get(channelId);
+  if (!existing) {
+    run.status = 'aborted';
+    run.abortReason = 'channel not in CHANNELS — add it first via the regular add flow';
+    await persist();
+    return;
+  }
+  const channelCtx: ChannelContext = {
+    record: existing,
+    sk: deriveChannelKey(env.BRIDGE_MASTER_SEED, channelId).sk,
+  };
+
+  let itCtx;
+  try {
+    itCtx = await getInnertubeContext(itStore);
+  } catch (err) {
+    run.status = 'aborted';
+    run.abortReason = 'innertube bootstrap failed: ' + String(err);
+    await persist();
+    return;
+  }
+
+  const relays = getRelayUrls(env);
+  const shortsKind = getShortsKind(env);
+
+  // ─── walk Videos tab ────────────────────────────────────────────────
+  run.phase = 'innertube-videos';
+  await persist();
+  let longEntries: InnertubeEntry[] = [];
+  try {
+    longEntries = await enumerateChannelTab(itCtx, channelId, 'videos', { maxEntries });
+    run.longSeen = longEntries.length;
+    await persist();
+  } catch (err) {
+    run.status = 'aborted';
+    run.abortReason = 'videos tab enumeration: ' + String(err);
+    await persist();
+    return;
+  }
+
+  run.phase = 'publishing-videos';
+  await persist();
+  for (const ie of longEntries) {
+    try {
+      if (await published.has(ie.videoId)) {
+        run.alreadyPublished++;
+      } else {
+        const fe = feedEntryFromInnertube(ie, channelId);
+        const ok = await publishVideoEntry(channelCtx, published, archive, fe, 'long', shortsKind, relays, true);
+        if (ok) {
+          run.longPublished++;
+          run.lastVideoId = ie.videoId;
+          run.lastVideoTitle = ie.title;
+        } else {
+          run.errors++;
+        }
+      }
+    } catch (err) {
+      run.errors++;
+      console.warn(`backfill long ${ie.videoId} failed:`, err);
+    }
+    // Persist every event so the dashboard ticker is live; KV writes are
+    // cheap (~10ms) and concurrent with the next event's relay handshake.
+    await persist();
+  }
+
+  // ─── walk Shorts tab ────────────────────────────────────────────────
+  run.phase = 'innertube-shorts';
+  await persist();
+  let shortEntries: InnertubeEntry[] = [];
+  try {
+    shortEntries = await enumerateChannelTab(itCtx, channelId, 'shorts', { maxEntries });
+    run.shortSeen = shortEntries.length;
+    await persist();
+  } catch (err) {
+    run.status = 'aborted';
+    run.abortReason = 'shorts tab enumeration: ' + String(err);
+    await persist();
+    return;
+  }
+
+  run.phase = 'publishing-shorts';
+  await persist();
+  for (const ie of shortEntries) {
+    try {
+      if (await published.has(ie.videoId)) {
+        run.alreadyPublished++;
+      } else {
+        const fe = feedEntryFromInnertube(ie, channelId);
+        const ok = await publishVideoEntry(channelCtx, published, archive, fe, 'short', shortsKind, relays, true);
+        if (ok) {
+          run.shortPublished++;
+          run.lastVideoId = ie.videoId;
+          run.lastVideoTitle = ie.title;
+        } else {
+          run.errors++;
+        }
+      }
+    } catch (err) {
+      run.errors++;
+      console.warn(`backfill short ${ie.videoId} failed:`, err);
+    }
+    await persist();
+  }
+
+  run.phase = 'done';
+  run.status = 'done';
+  await persist();
+}
+
+/**
+ * POST /admin/channels/:id/backfill — kick off a background backfill.
+ * Returns {runId} immediately; client polls GET /admin/backfill/:runId.
+ */
+async function handleAdminBackfillChannel(
+  channelId: string,
+  req: Request,
+  env: Env,
+  exCtx: ExecutionContext,
+): Promise<Response> {
   if (!channelId.startsWith('UC')) {
     return new Response('channelId must be a UC... id', { status: 400 });
   }
@@ -601,105 +766,29 @@ async function handleAdminBackfillChannel(channelId: string, req: Request, env: 
     ? Math.min(body.maxEntries, 10_000)
     : 10_000;
 
+  // Sanity: channel must exist before we kick off background work.
   const channels = new ChannelStore(env.CHANNELS);
-  const published = new PublishedStore(env.PUBLISHED);
-  const archive = new EventStore(env.EVENTS);
-  const itStore = new InnertubeContextStore(env.CHANNELS);
-
-  // Channel must already exist (added via the regular add flow). We need the
-  // derived nsec, and we want kind:0 to have been published.
   const existing = await channels.get(channelId);
   if (!existing) {
     return jsonResponse({ ok: false, error: 'channel not in CHANNELS — add it first via the regular add flow' }, 404);
   }
-  const ctx: ChannelContext = {
-    record: existing,
-    sk: deriveChannelKey(env.BRIDGE_MASTER_SEED, channelId).sk,
-  };
 
-  let itCtx;
-  try {
-    itCtx = await getInnertubeContext(itStore);
-  } catch (err) {
-    return jsonResponse({ ok: false, error: 'innertube bootstrap failed: ' + String(err) }, 502);
-  }
+  const runId = newRunId();
+  // Kick off the background work; the Worker stays alive until the promise
+  // resolves. ctx.waitUntil is what makes a Worker "hold itself open" past
+  // the HTTP response.
+  exCtx.waitUntil(runBackfill(env, runId, channelId, maxEntries));
+  return jsonResponse({ ok: true, runId, channelId });
+}
 
-  const relays = getRelayUrls(env);
-  const shortsKind = getShortsKind(env);
-
-  let longSeen = 0;
-  let shortSeen = 0;
-  let longPublished = 0;
-  let shortPublished = 0;
-  let alreadyPublished = 0;
-  let errors = 0;
-  let phase: 'videos' | 'shorts' | 'done' = 'videos';
-  let aborted = false;
-  let abortReason = '';
-
-  try {
-    const longEntries = await enumerateChannelTab(itCtx, channelId, 'videos', { maxEntries });
-    longSeen = longEntries.length;
-    for (const ie of longEntries) {
-      try {
-        if (await published.has(ie.videoId)) {
-          alreadyPublished++;
-          continue;
-        }
-        const fe = feedEntryFromInnertube(ie, channelId);
-        const ok = await publishVideoEntry(ctx, published, archive, fe, 'long', shortsKind, relays, true);
-        if (ok) longPublished++;
-        else errors++;
-      } catch (err) {
-        errors++;
-        console.warn(`backfill long ${ie.videoId} failed:`, err);
-      }
-    }
-  } catch (err) {
-    aborted = true;
-    abortReason = `videos tab: ${String(err)}`;
-  }
-
-  if (!aborted) {
-    phase = 'shorts';
-    try {
-      const shortEntries = await enumerateChannelTab(itCtx, channelId, 'shorts', { maxEntries });
-      shortSeen = shortEntries.length;
-      for (const ie of shortEntries) {
-        try {
-          if (await published.has(ie.videoId)) {
-            alreadyPublished++;
-            continue;
-          }
-          const fe = feedEntryFromInnertube(ie, channelId);
-          const ok = await publishVideoEntry(ctx, published, archive, fe, 'short', shortsKind, relays, true);
-          if (ok) shortPublished++;
-          else errors++;
-        } catch (err) {
-          errors++;
-          console.warn(`backfill short ${ie.videoId} failed:`, err);
-        }
-      }
-    } catch (err) {
-      aborted = true;
-      abortReason = `shorts tab: ${String(err)}`;
-    }
-  }
-  if (!aborted) phase = 'done';
-
-  return jsonResponse({
-    ok: !aborted,
-    aborted,
-    abortReason,
-    phase,
-    channelId,
-    longSeen,
-    shortSeen,
-    longPublished,
-    shortPublished,
-    alreadyPublished,
-    errors,
-  });
+/**
+ * GET /admin/backfill/:runId — poll a backfill's progress.
+ */
+async function handleAdminBackfillStatus(runId: string, env: Env): Promise<Response> {
+  const runs = new BackfillRunStore(env.CHANNELS);
+  const run = await runs.get(runId);
+  if (!run) return jsonResponse({ ok: false, error: 'run not found (24h TTL)' }, 404);
+  return jsonResponse({ ok: true, run });
 }
 
 async function handleAdminArchiveStats(env: Env): Promise<Response> {
@@ -757,7 +846,7 @@ async function runCron(env: Env): Promise<void> {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, exCtx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const m = request.method;
 
@@ -792,7 +881,10 @@ export default {
       if (vidsMatch && m === 'GET') return handleAdminChannelVideos(vidsMatch[1]!, env);
 
       const backfillMatch = url.pathname.match(/^\/admin\/channels\/(UC[\w-]{22})\/backfill$/);
-      if (backfillMatch && m === 'POST') return handleAdminBackfillChannel(backfillMatch[1]!, request, env);
+      if (backfillMatch && m === 'POST') return handleAdminBackfillChannel(backfillMatch[1]!, request, env, exCtx);
+
+      const backfillStatusMatch = url.pathname.match(/^\/admin\/backfill\/([A-Za-z0-9-]+)$/);
+      if (backfillStatusMatch && m === 'GET') return handleAdminBackfillStatus(backfillStatusMatch[1]!, env);
 
       if (m === 'POST' && url.pathname === '/admin/resolve') return handleAdminResolve(request);
       if (m === 'POST' && url.pathname === '/admin/preview') return handleAdminPreview(request, env);
