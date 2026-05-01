@@ -131,6 +131,12 @@ export const INDEX_HTML = String.raw`<!doctype html>
         <input type="text" id="preview-input" placeholder="https://www.youtube.com/@veritasium" />
       </div>
       <div>
+        <label>Long-form kind</label>
+        <select id="preview-long-kind" disabled title="NIP-71 only defines kind:21 for long-form video; addressable kind:34235 is not widely supported">
+          <option value="21">21 (NIP-71)</option>
+        </select>
+      </div>
+      <div>
         <label>Shorts kind</label>
         <select id="preview-shorts-kind">
           <option value="22">22 (default)</option>
@@ -146,6 +152,9 @@ export const INDEX_HTML = String.raw`<!doctype html>
         <button class="btn secondary" id="btn-preview">Preview</button>
       </div>
     </div>
+    <p class="empty" style="text-align:left;padding:0;margin-top:8px">
+      YouTube RSS exposes only the most recent ~15 long-form and ~15 shorts per channel. The "limit per feed" caps how many of those the preview shows; it cannot reach further back into channel history.
+    </p>
     <h3 style="margin-top:16px">Relays</h3>
     <div class="relay-list" id="relay-list"></div>
     <div class="row" style="margin-top:8px">
@@ -247,6 +256,14 @@ export const INDEX_HTML = String.raw`<!doctype html>
     <h3>Default relays (from worker)</h3>
     <pre id="settings-relays">…</pre>
   </div>
+  <div class="card">
+    <h3>Maintenance</h3>
+    <p class="empty" style="text-align:left;padding:0">Re-build the per-channel video index from the master video log. Safe to run any time; needed once after upgrading from a worker version that did not write the secondary index.</p>
+    <div class="row" style="margin-top:8px">
+      <button class="btn secondary" id="btn-reindex">Reindex video counts</button>
+      <span id="reindex-result" style="color:var(--muted)"></span>
+    </div>
+  </div>
 </section>
 
 </main>
@@ -296,17 +313,39 @@ async function api(path, opts = {}) {
 }
 
 // ─── ui helpers ─────────────────────────────────────────────────────────
-function toast(msg, kind) {
+function toast(msg, kind, opts) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'toast ' + (kind || '');
   el.style.display = 'block';
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { el.style.display = 'none'; }, 4000);
+  if (!(opts && opts.sticky)) {
+    toast._t = setTimeout(() => { el.style.display = 'none'; }, 4000);
+  }
+}
+function hideToast() {
+  clearTimeout(toast._t);
+  document.getElementById('toast').style.display = 'none';
 }
 function fmtTs(ts) {
   if (!ts) return '—';
   return new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ');
+}
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('copied', 'ok');
+  } catch (e) { toast('copy failed: ' + e.message, 'error'); }
+}
+function npubCell(npub) {
+  if (!npub) return el('span', { class: 'npub' }, '(unknown)');
+  const wrap = el('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap' });
+  const linkUrl = 'https://njump.me/' + npub;
+  wrap.appendChild(el('a', { class: 'npub', href: linkUrl, target: '_blank', title: npub }, npub.slice(0, 16) + '…'));
+  const btn = el('button', { class: 'btn secondary', style: 'padding:2px 6px;font-size:11px', title: 'Copy ' + npub }, '⧉');
+  btn.addEventListener('click', () => copyToClipboard(npub));
+  wrap.appendChild(btn);
+  return wrap;
 }
 function el(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
@@ -354,6 +393,17 @@ document.getElementById('btn-save-token').addEventListener('click', () => {
   loadChannels();
 });
 document.getElementById('settings-token').value = getToken();
+
+document.getElementById('btn-reindex').addEventListener('click', async () => {
+  const out = document.getElementById('reindex-result');
+  out.textContent = 'reindexing…';
+  try {
+    const r = await api('/admin/reindex', { method: 'POST', body: JSON.stringify({}) });
+    out.textContent = 'scanned ' + r.scanned + ', indexed ' + r.indexed;
+    toast('reindex complete', 'ok');
+    loadChannels();
+  } catch (e) { out.textContent = 'error: ' + e.message; toast(e.message, 'error'); }
+});
 
 // ─── public config (default relays etc.) ────────────────────────────────
 async function loadConfig() {
@@ -411,11 +461,14 @@ function renderChannels() {
       else selectedForPack.delete(c.channelId);
       document.getElementById('btn-to-pack').disabled = selectedForPack.size === 0;
     });
-    const link = el('a', { href: 'https://www.youtube.com/channel/' + c.channelId, target: '_blank' }, c.channelId);
+    const titleNode = el('a', {
+      href: c.url || ('https://www.youtube.com/channel/' + c.channelId), target: '_blank',
+    }, c.title || c.channelId);
+    const idLine = el('div', { class: 'npub' }, c.channelId);
     tbody.appendChild(el('tr', {},
       el('td', {}, cb),
-      el('td', {}, link),
-      el('td', {}, el('span', { class: 'npub' }, c.npub.slice(0, 16) + '…')),
+      el('td', {}, titleNode, idLine),
+      el('td', {}, npubCell(c.npub)),
       el('td', {}, String(c.counts?.long ?? 0)),
       el('td', {}, String(c.counts?.short ?? 0)),
       el('td', {}, fmtTs(c.counts?.lastPublishedAt)),
@@ -424,9 +477,20 @@ function renderChannels() {
           class: 'btn secondary', on: { click: () => { jumpToPreview(c.channelId); } },
         }, 'Preview'),
         ' ',
-        el('button', {
-          class: 'btn secondary', on: { click: () => publishNow(c.channelId) },
-        }, 'Publish now'),
+        (() => {
+          const b = el('button', { class: 'btn secondary' }, 'Publish now');
+          b.addEventListener('click', () => publishNow(c.channelId, b));
+          return b;
+        })(),
+        ' ',
+        (() => {
+          const b = el('button', {
+            class: 'btn secondary',
+            title: 'Walk every video in this channel via YouTube\'s internal API. Backfilled events have empty descriptions and approximate timestamps.',
+          }, 'Backfill all');
+          b.addEventListener('click', () => backfillAll(c.channelId, b));
+          return b;
+        })(),
         ' ',
         el('button', {
           class: 'btn danger', on: { click: () => deleteChannel(c.channelId) },
@@ -439,8 +503,10 @@ function renderChannels() {
   document.getElementById('btn-to-pack').disabled = selectedForPack.size === 0;
 }
 
-async function publishNow(channelId) {
-  toast('publishing ' + channelId + '…');
+async function publishNow(channelId, btn) {
+  const originalLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Publishing…'; }
+  toast('publishing ' + channelId + ' — this can take 30–90s while we wait for relays…', '', { sticky: true });
   try {
     const r = await api('/admin/publish', {
       method: 'POST',
@@ -450,9 +516,51 @@ async function publishNow(channelId) {
         shortsKind: parseInt(document.getElementById('preview-shorts-kind').value, 10),
       }),
     });
-    toast('+' + r.published.longPublished + ' long, +' + r.published.shortPublished + ' short', 'ok');
+    toast('done: +' + r.published.longPublished + ' long, +' + r.published.shortPublished + ' short', 'ok');
     loadChannels();
   } catch (e) { toast(e.message, 'error'); }
+  finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+  }
+}
+
+async function backfillAll(channelId, btn) {
+  const ok = confirm(
+    'Backfill all videos for ' + channelId + '?\\n\\n' +
+    'This walks YouTube\\'s internal API to enumerate every video on the channel and ' +
+    'publishes a Nostr event for each one not already published.\\n\\n' +
+    'Caveats:\\n' +
+    '  • Descriptions will be empty (RSS gives descriptions only for the most recent ~15).\\n' +
+    '  • Timestamps are approximate (parsed from "3 weeks ago"). Shorts have no upload date at all and will be ordered by their position in the Shorts tab.\\n' +
+    '  • Large channels (1000+ videos) may take several minutes; relay publishing is the bottleneck.\\n\\n' +
+    'You can re-click later to resume — already-published videos are skipped.'
+  );
+  if (!ok) return;
+  const originalLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Backfilling…'; }
+  toast('backfilling ' + channelId + ' — this can take several minutes for large channels…', '', { sticky: true });
+  try {
+    const r = await api('/admin/channels/' + channelId + '/backfill', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    if (r.ok) {
+      toast(
+        'backfill done: scanned ' + (r.longSeen + r.shortSeen) +
+        ' (' + r.longSeen + ' long + ' + r.shortSeen + ' short), +' +
+        r.longPublished + ' long / +' + r.shortPublished + ' short / ' +
+        r.alreadyPublished + ' skipped / ' + r.errors + ' errors',
+        'ok',
+      );
+    } else {
+      toast('backfill aborted in ' + r.phase + ': ' + r.abortReason, 'error');
+    }
+    loadChannels();
+  } catch (e) {
+    toast('backfill failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+  }
 }
 
 async function deleteChannel(channelId) {
@@ -564,7 +672,7 @@ function renderPreview(p) {
   ));
   const btn = el('button', {
     class: 'btn',
-    on: { click: () => publishSelected(p.channelId, getCheckedIds()) },
+    on: { click: () => publishSelected(p.channelId, getCheckedIds(), btn) },
   }, 'Publish selected');
   header.appendChild(btn);
   card.appendChild(header);
@@ -609,9 +717,14 @@ function renderPreview(p) {
   }
 }
 
-async function publishSelected(channelId, videoIds) {
+async function publishSelected(channelId, videoIds, btn) {
   if (videoIds.length === 0) { toast('nothing selected'); return; }
-  toast('publishing ' + videoIds.length + ' video(s)…');
+  const originalLabel = btn ? btn.textContent : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Publishing ' + videoIds.length + '…';
+  }
+  toast('publishing ' + videoIds.length + ' video(s) — this can take 30–90s while we wait for relays…', '', { sticky: true });
   try {
     const shortsKind = parseInt(document.getElementById('preview-shorts-kind').value, 10);
     const r = await api('/admin/publish', {
@@ -623,10 +736,13 @@ async function publishSelected(channelId, videoIds) {
         relayUrls: getRelays(),
       }),
     });
-    toast('+' + r.published.longPublished + ' long, +' + r.published.shortPublished + ' short', 'ok');
+    toast('done: +' + r.published.longPublished + ' long, +' + r.published.shortPublished + ' short', 'ok');
     doPreview();
     loadChannels();
   } catch (e) { toast(e.message, 'error'); }
+  finally {
+    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
+  }
 }
 
 // ─── relay list ─────────────────────────────────────────────────────────
@@ -674,16 +790,17 @@ function renderPackChannels() {
     return;
   }
   const ul = el('table');
-  ul.appendChild(el('thead', {}, el('tr', {}, el('th', {}, 'Channel id'), el('th', {}, 'npub'), el('th', {}))));
+  ul.appendChild(el('thead', {}, el('tr', {}, el('th', {}, 'Channel'), el('th', {}, 'npub'), el('th', {}))));
   const tbody = el('tbody');
   for (const id of selectedForPack) {
     const c = lastChannels.find((x) => x.channelId === id);
     const remove = el('button', {
       class: 'btn secondary', on: { click: () => { selectedForPack.delete(id); renderPackChannels(); renderChannels(); } },
     }, 'remove');
+    const title = c?.title || id;
     tbody.appendChild(el('tr', {},
-      el('td', {}, id),
-      el('td', {}, el('span', { class: 'npub' }, c ? c.npub.slice(0, 16) + '…' : '(unknown)')),
+      el('td', {}, title, el('div', { class: 'npub' }, id)),
+      el('td', {}, npubCell(c?.npub)),
       el('td', {}, remove),
     ));
   }

@@ -1,5 +1,6 @@
 import { deriveChannelKey } from './derive';
-import { ChannelStore, EventStore, PublishedStore, type ArchivedEvent, type ChannelRecord, type PublishedRecord } from './kv';
+import { ChannelStore, EventStore, InnertubeContextStore, PublishedStore, type ArchivedEvent, type ChannelRecord, type PublishedRecord } from './kv';
+import { enumerateChannelTab, getInnertubeContext, type InnertubeEntry } from './innertube';
 import {
   buildFollowPackEvent,
   buildKind0,
@@ -101,6 +102,8 @@ async function maybePublishKind0(
   await archive.put(signed as ArchivedEvent, ctx.record.channelId);
   const updated: ChannelRecord = {
     ...ctx.record,
+    title: meta.title,
+    url: meta.url,
     kind0PublishedAt: Math.floor(Date.now() / 1000),
     kind0Hash: newHash,
   };
@@ -116,9 +119,10 @@ async function publishVideoEntry(
   classification: 'long' | 'short',
   shortsKind: ShortsKind,
   relayUrls: string[],
+  approximate = false,
 ): Promise<boolean> {
   if (await published.has(entry.videoId)) return false;
-  const tmpl = buildVideoEvent({ entry, classification, shortsKind });
+  const tmpl = buildVideoEvent({ entry, classification, shortsKind, approximate });
   const signed = signEvent(tmpl, ctx.sk);
   const accepted = await publishToRelays(signed, relayUrls);
   if (accepted === 0) {
@@ -163,6 +167,11 @@ async function processChannel(
       url: feeds.channelInfo.url,
     };
     await maybePublishKind0(channels, archive, ctx, meta, relays);
+    if (ctx.record.title !== meta.title || ctx.record.url !== meta.url) {
+      const updated: ChannelRecord = { ...ctx.record, title: meta.title, url: meta.url };
+      await channels.put(updated);
+      ctx.record = updated;
+    }
   }
 
   let longEntries = feeds.long;
@@ -432,6 +441,16 @@ async function handleAdminFollowPackBuild(req: Request, env: Env): Promise<Respo
   return jsonResponse({ ok: true, event: tmpl, included: looked.map((c) => c.channelId), missing });
 }
 
+async function handleAdminReindex(req: Request, env: Env): Promise<Response> {
+  let body: { channelId?: string } = {};
+  try {
+    body = await req.json();
+  } catch { /* empty body is ok */ }
+  const published = new PublishedStore(env.PUBLISHED);
+  const r = await published.reindexChannel(body.channelId);
+  return jsonResponse({ ok: true, ...r });
+}
+
 async function handleAdminFollowPackPublish(req: Request, env: Env): Promise<Response> {
   let body: { event?: unknown; relayUrls?: string[] };
   try {
@@ -546,6 +565,143 @@ async function republishFromArchive(env: Env, opts: RepublishOpts): Promise<Repu
   };
 }
 
+/**
+ * Convert an InnerTube entry to a FeedEntry shape so it can flow through the
+ * existing publishVideoEntry path. Description is empty (InnerTube doesn't
+ * expose it from the channel-tab response); thumbnail uses the standard
+ * /vi/<id>/hqdefault pattern.
+ */
+function feedEntryFromInnertube(ie: InnertubeEntry, channelId: string): FeedEntry {
+  return {
+    videoId: ie.videoId,
+    channelId,
+    channelTitle: '',
+    channelUrl: `https://www.youtube.com/channel/${channelId}`,
+    authorName: '',
+    title: ie.title,
+    description: '',
+    publishedAtUnix: ie.publishedAtApproxUnix,
+    watchUrl: `https://www.youtube.com/watch?v=${ie.videoId}`,
+    thumbnailUrl: `https://i.ytimg.com/vi/${ie.videoId}/hqdefault.jpg`,
+    source: 'unknown',
+  };
+}
+
+async function handleAdminBackfillChannel(channelId: string, req: Request, env: Env): Promise<Response> {
+  if (!channelId.startsWith('UC')) {
+    return new Response('channelId must be a UC... id', { status: 400 });
+  }
+  let body: { maxEntries?: number } = {};
+  try {
+    body = await req.json();
+  } catch {
+    // empty body is fine
+  }
+  const maxEntries = typeof body.maxEntries === 'number' && body.maxEntries > 0
+    ? Math.min(body.maxEntries, 10_000)
+    : 10_000;
+
+  const channels = new ChannelStore(env.CHANNELS);
+  const published = new PublishedStore(env.PUBLISHED);
+  const archive = new EventStore(env.EVENTS);
+  const itStore = new InnertubeContextStore(env.CHANNELS);
+
+  // Channel must already exist (added via the regular add flow). We need the
+  // derived nsec, and we want kind:0 to have been published.
+  const existing = await channels.get(channelId);
+  if (!existing) {
+    return jsonResponse({ ok: false, error: 'channel not in CHANNELS — add it first via the regular add flow' }, 404);
+  }
+  const ctx: ChannelContext = {
+    record: existing,
+    sk: deriveChannelKey(env.BRIDGE_MASTER_SEED, channelId).sk,
+  };
+
+  let itCtx;
+  try {
+    itCtx = await getInnertubeContext(itStore);
+  } catch (err) {
+    return jsonResponse({ ok: false, error: 'innertube bootstrap failed: ' + String(err) }, 502);
+  }
+
+  const relays = getRelayUrls(env);
+  const shortsKind = getShortsKind(env);
+
+  let longSeen = 0;
+  let shortSeen = 0;
+  let longPublished = 0;
+  let shortPublished = 0;
+  let alreadyPublished = 0;
+  let errors = 0;
+  let phase: 'videos' | 'shorts' | 'done' = 'videos';
+  let aborted = false;
+  let abortReason = '';
+
+  try {
+    const longEntries = await enumerateChannelTab(itCtx, channelId, 'videos', { maxEntries });
+    longSeen = longEntries.length;
+    for (const ie of longEntries) {
+      try {
+        if (await published.has(ie.videoId)) {
+          alreadyPublished++;
+          continue;
+        }
+        const fe = feedEntryFromInnertube(ie, channelId);
+        const ok = await publishVideoEntry(ctx, published, archive, fe, 'long', shortsKind, relays, true);
+        if (ok) longPublished++;
+        else errors++;
+      } catch (err) {
+        errors++;
+        console.warn(`backfill long ${ie.videoId} failed:`, err);
+      }
+    }
+  } catch (err) {
+    aborted = true;
+    abortReason = `videos tab: ${String(err)}`;
+  }
+
+  if (!aborted) {
+    phase = 'shorts';
+    try {
+      const shortEntries = await enumerateChannelTab(itCtx, channelId, 'shorts', { maxEntries });
+      shortSeen = shortEntries.length;
+      for (const ie of shortEntries) {
+        try {
+          if (await published.has(ie.videoId)) {
+            alreadyPublished++;
+            continue;
+          }
+          const fe = feedEntryFromInnertube(ie, channelId);
+          const ok = await publishVideoEntry(ctx, published, archive, fe, 'short', shortsKind, relays, true);
+          if (ok) shortPublished++;
+          else errors++;
+        } catch (err) {
+          errors++;
+          console.warn(`backfill short ${ie.videoId} failed:`, err);
+        }
+      }
+    } catch (err) {
+      aborted = true;
+      abortReason = `shorts tab: ${String(err)}`;
+    }
+  }
+  if (!aborted) phase = 'done';
+
+  return jsonResponse({
+    ok: !aborted,
+    aborted,
+    abortReason,
+    phase,
+    channelId,
+    longSeen,
+    shortSeen,
+    longPublished,
+    shortPublished,
+    alreadyPublished,
+    errors,
+  });
+}
+
 async function handleAdminArchiveStats(env: Env): Promise<Response> {
   const archive = new EventStore(env.EVENTS);
   const stats = await archive.stats();
@@ -635,6 +791,9 @@ export default {
       const vidsMatch = url.pathname.match(/^\/admin\/channels\/(UC[\w-]{22})\/videos$/);
       if (vidsMatch && m === 'GET') return handleAdminChannelVideos(vidsMatch[1]!, env);
 
+      const backfillMatch = url.pathname.match(/^\/admin\/channels\/(UC[\w-]{22})\/backfill$/);
+      if (backfillMatch && m === 'POST') return handleAdminBackfillChannel(backfillMatch[1]!, request, env);
+
       if (m === 'POST' && url.pathname === '/admin/resolve') return handleAdminResolve(request);
       if (m === 'POST' && url.pathname === '/admin/preview') return handleAdminPreview(request, env);
       if (m === 'POST' && url.pathname === '/admin/publish') return handleAdminPublish(request, env);
@@ -645,6 +804,7 @@ export default {
 
       if (m === 'GET' && url.pathname === '/admin/archive/stats') return handleAdminArchiveStats(env);
       if (m === 'POST' && url.pathname === '/admin/archive/republish') return handleAdminRepublish(request, env);
+      if (m === 'POST' && url.pathname === '/admin/reindex') return handleAdminReindex(request, env);
     }
 
     return new Response('not found', { status: 404 });

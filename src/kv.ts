@@ -3,6 +3,10 @@ export interface ChannelRecord {
   addedAt: number;
   npub: string;
   pubkeyHex: string;
+  /** Human-readable channel name from YouTube. Populated on first kind:0 publish. */
+  title?: string;
+  /** YouTube channel URL. Populated on first kind:0 publish. */
+  url?: string;
   kind0PublishedAt?: number;
   kind0Hash?: string;
 }
@@ -77,6 +81,30 @@ export class PublishedStore {
       this.kv.put(VIDEO_PREFIX + record.videoId, JSON.stringify(record)),
       this.kv.put(channelVideoKey(record.channelId, record.publishedAt, record.videoId), record.videoId),
     ]);
+  }
+
+  /**
+   * Walk every video:* record and write the chvid: secondary index for any
+   * record that's missing it. Idempotent — repeat writes are harmless.
+   * Returns the number of (re-)indexed records.
+   */
+  async reindexChannel(channelId?: string): Promise<{ scanned: number; indexed: number }> {
+    let scanned = 0;
+    let indexed = 0;
+    let cursor: string | undefined;
+    do {
+      const page = await this.kv.list({ prefix: VIDEO_PREFIX, cursor });
+      for (const k of page.keys) {
+        const rec = await this.kv.get<PublishedRecord>(k.name, 'json');
+        if (!rec) continue;
+        scanned++;
+        if (channelId && rec.channelId !== channelId) continue;
+        await this.kv.put(channelVideoKey(rec.channelId, rec.publishedAt, rec.videoId), rec.videoId);
+        indexed++;
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+    return { scanned, indexed };
   }
 
   /** Newest-first list of published videos for a channel. */
@@ -196,5 +224,29 @@ export class EventStore {
       cursor = page.list_complete ? undefined : page.cursor;
     } while (cursor);
     return { total, byKind };
+  }
+}
+
+/**
+ * Cached InnerTube bootstrap context (apiKey + clientVersion) scraped from
+ * the YouTube homepage. Single-key store; no list/scan needed.
+ */
+export interface InnertubeContext {
+  apiKey: string;
+  clientVersion: string;
+  fetchedAt: number;
+}
+
+const INNERTUBE_CONTEXT_KEY = 'innertube:context';
+
+export class InnertubeContextStore {
+  constructor(private kv: KVNamespace) {}
+
+  async get(): Promise<InnertubeContext | null> {
+    return this.kv.get<InnertubeContext>(INNERTUBE_CONTEXT_KEY, 'json');
+  }
+
+  async put(ctx: InnertubeContext): Promise<void> {
+    await this.kv.put(INNERTUBE_CONTEXT_KEY, JSON.stringify(ctx));
   }
 }

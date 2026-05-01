@@ -57,9 +57,16 @@ export interface VideoEventInput {
   classification: 'long' | 'short';
   /** Which kind to use for shorts (default 22; 34236 is the addressable variant). */
   shortsKind: ShortsKind;
+  /**
+   * When true, signals the entry came from a backfill source (InnerTube)
+   * where the upload timestamp is approximate — not the precise RSS
+   * <published> value. The alt tag is annotated accordingly so downstream
+   * clients can distinguish exact-time events from approximate ones.
+   */
+  approximate?: boolean;
 }
 
-export function buildVideoEvent({ entry, classification, shortsKind }: VideoEventInput): EventTemplate {
+export function buildVideoEvent({ entry, classification, shortsKind, approximate }: VideoEventInput): EventTemplate {
   const kind = classification === 'long' ? 21 : shortsKind;
 
   const tags: string[][] = [];
@@ -69,10 +76,11 @@ export function buildVideoEvent({ entry, classification, shortsKind }: VideoEven
     tags.push(['d', `youtube:${entry.videoId}`]);
   }
 
+  const altPrefix = approximate ? 'Video (approx upload time)' : 'Video';
   tags.push(
     ['title', entry.title],
     ['published_at', String(entry.publishedAtUnix)],
-    ['alt', `Video: ${entry.title}`],
+    ['alt', `${altPrefix}: ${entry.title}`],
   );
   tags.push(['r', entry.watchUrl]);
   tags.push([
@@ -84,8 +92,9 @@ export function buildVideoEvent({ entry, classification, shortsKind }: VideoEven
 
   return {
     kind,
-    // created_at = original YouTube upload time, so feeds sort the bridged
-    // event into its true place in time (not the moment the bridge ran).
+    // created_at = original YouTube upload time when known (RSS path); for
+    // backfill (InnerTube), an approximate value derived from the relative
+    // "X ago" string or, for shorts, the channel-tab order.
     created_at: entry.publishedAtUnix,
     tags,
     content: entry.description,
