@@ -9,6 +9,17 @@ export interface ChannelRecord {
   url?: string;
   kind0PublishedAt?: number;
   kind0Hash?: string;
+  /**
+   * URL of the resized avatar we last uploaded to nostr.build for this channel.
+   * What goes into kind:0's `picture` field. Cleared by deleting the record.
+   */
+  uploadedPictureUrl?: string;
+  /**
+   * The upstream YouTube avatar URL that produced `uploadedPictureUrl`.
+   * Cache key: if the next InnerTube fetch returns the same URL, we reuse
+   * `uploadedPictureUrl` and skip the wsrv.nl + nostr.build round-trip.
+   */
+  uploadedFromYtUrl?: string;
 }
 
 export interface PublishedRecord {

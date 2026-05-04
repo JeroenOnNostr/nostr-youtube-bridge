@@ -1,5 +1,6 @@
 import { deriveChannelKey } from './derive';
 import { BackfillRunStore, ChannelStore, EventStore, InnertubeContextStore, PublishedStore, type ArchivedEvent, type BackfillRun, type ChannelRecord, type PublishedRecord } from './kv';
+import { rehostAvatar } from './imageHost';
 import { enumerateChannelTab, fetchChannelPicture, getInnertubeContext, type InnertubeEntry } from './innertube';
 import {
   buildFollowPackEvent,
@@ -191,14 +192,34 @@ async function processChannel(
   const shortsKind = opts.shortsKindOverride ?? getShortsKind(env);
 
   if (feeds.channelInfo) {
-    let pictureUrl: string | undefined;
+    let ytPictureUrl: string | undefined;
     try {
       const itStore = new InnertubeContextStore(env.CHANNELS);
       const itCtx = await getInnertubeContext(itStore);
-      pictureUrl = (await fetchChannelPicture(itCtx, channelId)) ?? undefined;
+      ytPictureUrl = (await fetchChannelPicture(itCtx, channelId)) ?? undefined;
     } catch (err) {
       console.warn(`fetchChannelPicture for ${channelId} failed:`, err);
     }
+
+    let pictureUrl = ytPictureUrl;
+    if (ytPictureUrl) {
+      if (ctx.record.uploadedFromYtUrl === ytPictureUrl && ctx.record.uploadedPictureUrl) {
+        pictureUrl = ctx.record.uploadedPictureUrl;
+      } else {
+        const rehosted = await rehostAvatar(ytPictureUrl);
+        if (rehosted) {
+          pictureUrl = rehosted;
+          const updated: ChannelRecord = {
+            ...ctx.record,
+            uploadedFromYtUrl: ytPictureUrl,
+            uploadedPictureUrl: rehosted,
+          };
+          await channels.put(updated);
+          ctx.record = updated;
+        }
+      }
+    }
+
     const meta: ChannelMetadata = {
       id: feeds.channelInfo.id,
       title: feeds.channelInfo.title || feeds.channelInfo.authorName || channelId,
