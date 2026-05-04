@@ -311,6 +311,91 @@ export async function enumerateChannelTab(
   return out.slice(0, maxEntries);
 }
 
+// ─── channel avatar lookup ──────────────────────────────────────────────
+
+interface ThumbnailEntry {
+  url?: string;
+  width?: number;
+  height?: number;
+}
+
+interface ChannelHomeResponse {
+  header?: {
+    c4TabbedHeaderRenderer?: {
+      avatar?: { thumbnails?: ThumbnailEntry[] };
+    };
+    pageHeaderRenderer?: {
+      content?: {
+        pageHeaderViewModel?: {
+          image?: {
+            decoratedAvatarViewModel?: {
+              avatar?: {
+                avatarViewModel?: {
+                  image?: { sources?: ThumbnailEntry[] };
+                };
+              };
+            };
+          };
+        };
+      };
+    };
+  };
+}
+
+function pickLargest(thumbs: ThumbnailEntry[] | undefined): string | null {
+  if (!thumbs || thumbs.length === 0) return null;
+  let best: ThumbnailEntry | null = null;
+  for (const t of thumbs) {
+    if (!t.url) continue;
+    if (!best || (t.width ?? 0) > (best.width ?? 0)) best = t;
+  }
+  // Fall back to last entry if no widths were present at all.
+  if (!best) {
+    for (let i = thumbs.length - 1; i >= 0; i--) {
+      if (thumbs[i]?.url) return thumbs[i]!.url!;
+    }
+    return null;
+  }
+  return best.url ?? null;
+}
+
+function extractAvatarUrl(json: unknown): string | null {
+  const r = json as ChannelHomeResponse;
+  const legacy = pickLargest(r.header?.c4TabbedHeaderRenderer?.avatar?.thumbnails);
+  if (legacy) return legacy;
+  const modern = pickLargest(
+    r.header?.pageHeaderRenderer?.content?.pageHeaderViewModel?.image
+      ?.decoratedAvatarViewModel?.avatar?.avatarViewModel?.image?.sources,
+  );
+  return modern;
+}
+
+/**
+ * Fetch the channel's profile picture URL via InnerTube /browse with no tab
+ * params (so the response carries the `header` block, which tab-scoped calls
+ * omit). Returns null on any failure — bot walls, 4xx/5xx, JSON parse errors,
+ * or when neither known header shape yields a URL. Callers should treat null
+ * as "skip the avatar this tick" and rely on the next cron retry.
+ */
+export async function fetchChannelPicture(
+  ctx: InnertubeContext,
+  channelId: string,
+): Promise<string | null> {
+  try {
+    const json = await postBrowse(ctx, {
+      context: buildContext(ctx),
+      browseId: channelId,
+    });
+    const url = extractAvatarUrl(json);
+    if (!url) return null;
+    if (url.startsWith('//')) return `https:${url}`;
+    return url;
+  } catch (err) {
+    console.warn(`fetchChannelPicture for ${channelId} failed:`, err);
+    return null;
+  }
+}
+
 function pushEntries(out: InnertubeEntry[], entries: ParsedEntry[], tab: 'videos' | 'shorts'): void {
   const dayMs = 86_400_000;
   const now = Date.now();
