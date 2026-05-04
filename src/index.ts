@@ -1,6 +1,6 @@
 import { deriveChannelKey } from './derive';
 import { BackfillRunStore, ChannelStore, EventStore, InnertubeContextStore, PublishedStore, type ArchivedEvent, type BackfillRun, type ChannelRecord, type PublishedRecord } from './kv';
-import { enumerateChannelTab, getInnertubeContext, type InnertubeEntry } from './innertube';
+import { enumerateChannelTab, fetchChannelPicture, getInnertubeContext, type InnertubeEntry } from './innertube';
 import {
   buildFollowPackEvent,
   buildKind0,
@@ -191,10 +191,19 @@ async function processChannel(
   const shortsKind = opts.shortsKindOverride ?? getShortsKind(env);
 
   if (feeds.channelInfo) {
+    let pictureUrl: string | undefined;
+    try {
+      const itStore = new InnertubeContextStore(env.CHANNELS);
+      const itCtx = await getInnertubeContext(itStore);
+      pictureUrl = (await fetchChannelPicture(itCtx, channelId)) ?? undefined;
+    } catch (err) {
+      console.warn(`fetchChannelPicture for ${channelId} failed:`, err);
+    }
     const meta: ChannelMetadata = {
       id: feeds.channelInfo.id,
       title: feeds.channelInfo.title || feeds.channelInfo.authorName || channelId,
       url: feeds.channelInfo.url,
+      pictureUrl,
     };
     await maybePublishKind0(channels, archive, ctx, meta, relays);
     if (ctx.record.title !== meta.title || ctx.record.url !== meta.url) {
