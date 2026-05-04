@@ -545,7 +545,7 @@ function fmtBackfillProgress(run) {
       (run.errors || 0) + ' errors)',
   ];
   if (run.lastVideoTitle) lines.push('Last: ' + run.lastVideoTitle.slice(0, 60));
-  return lines.join('\\n');
+  return lines.join('\n');
 }
 
 async function backfillAll(channelId, btn) {

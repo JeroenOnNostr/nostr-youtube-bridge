@@ -7,6 +7,7 @@ import {
   buildVideoEvent,
   kind0Hash,
   publishToRelays,
+  RelayPool,
   signEvent,
   type ChannelMetadata,
   type FollowPackChannel,
@@ -125,6 +126,35 @@ async function publishVideoEntry(
   const tmpl = buildVideoEvent({ entry, classification, shortsKind, approximate });
   const signed = signEvent(tmpl, ctx.sk);
   const accepted = await publishToRelays(signed, relayUrls);
+  if (accepted === 0) {
+    console.warn(`video ${entry.videoId} accepted by 0 relays — will retry`);
+    return false;
+  }
+  await archive.put(signed as ArchivedEvent, ctx.record.channelId);
+  await published.put({
+    videoId: entry.videoId,
+    eventId: signed.id,
+    publishedAt: Math.floor(Date.now() / 1000),
+    channelId: ctx.record.channelId,
+    kind: signed.kind,
+  });
+  return true;
+}
+
+async function publishVideoEntryPooled(
+  ctx: ChannelContext,
+  published: PublishedStore,
+  archive: EventStore,
+  entry: FeedEntry,
+  classification: 'long' | 'short',
+  shortsKind: ShortsKind,
+  pool: RelayPool,
+  approximate: boolean,
+): Promise<boolean> {
+  if (await published.has(entry.videoId)) return false;
+  const tmpl = buildVideoEvent({ entry, classification, shortsKind, approximate });
+  const signed = signEvent(tmpl, ctx.sk);
+  const accepted = await pool.publish(signed);
   if (accepted === 0) {
     console.warn(`video ${entry.videoId} accepted by 0 relays — will retry`);
     return false;
@@ -657,90 +687,112 @@ async function runBackfill(env: Env, runId: string, channelId: string, maxEntrie
 
   const relays = getRelayUrls(env);
   const shortsKind = getShortsKind(env);
+  const pool = new RelayPool(relays);
 
-  // ─── walk Videos tab ────────────────────────────────────────────────
-  run.phase = 'innertube-videos';
-  await persist();
-  let longEntries: InnertubeEntry[] = [];
-  try {
-    longEntries = await enumerateChannelTab(itCtx, channelId, 'videos', { maxEntries });
-    run.longSeen = longEntries.length;
-    await persist();
-  } catch (err) {
-    run.status = 'aborted';
-    run.abortReason = 'videos tab enumeration: ' + String(err);
-    await persist();
-    return;
-  }
-
-  run.phase = 'publishing-videos';
-  await persist();
-  for (const ie of longEntries) {
-    try {
-      if (await published.has(ie.videoId)) {
-        run.alreadyPublished++;
-      } else {
-        const fe = feedEntryFromInnertube(ie, channelId);
-        const ok = await publishVideoEntry(channelCtx, published, archive, fe, 'long', shortsKind, relays, true);
-        if (ok) {
-          run.longPublished++;
-          run.lastVideoId = ie.videoId;
-          run.lastVideoTitle = ie.title;
-        } else {
-          run.errors++;
-        }
-      }
-    } catch (err) {
-      run.errors++;
-      console.warn(`backfill long ${ie.videoId} failed:`, err);
+  // Persist every Nth event instead of every event — KV writes are ~10-30ms
+  // each and the toast only refreshes every 2s, so per-event persists were
+  // pure overhead. Phase transitions and terminal states still flush.
+  const PERSIST_EVERY = 5;
+  let sinceLastPersist = 0;
+  const tick = async () => {
+    sinceLastPersist++;
+    if (sinceLastPersist >= PERSIST_EVERY) {
+      sinceLastPersist = 0;
+      await persist();
     }
-    // Persist every event so the dashboard ticker is live; KV writes are
-    // cheap (~10ms) and concurrent with the next event's relay handshake.
+  };
+  const flush = async () => {
+    sinceLastPersist = 0;
     await persist();
-  }
+  };
 
-  // ─── walk Shorts tab ────────────────────────────────────────────────
-  run.phase = 'innertube-shorts';
-  await persist();
-  let shortEntries: InnertubeEntry[] = [];
   try {
-    shortEntries = await enumerateChannelTab(itCtx, channelId, 'shorts', { maxEntries });
-    run.shortSeen = shortEntries.length;
-    await persist();
-  } catch (err) {
-    run.status = 'aborted';
-    run.abortReason = 'shorts tab enumeration: ' + String(err);
-    await persist();
-    return;
-  }
-
-  run.phase = 'publishing-shorts';
-  await persist();
-  for (const ie of shortEntries) {
+    // ─── walk Videos tab ────────────────────────────────────────────────
+    run.phase = 'innertube-videos';
+    await flush();
+    let longEntries: InnertubeEntry[] = [];
     try {
-      if (await published.has(ie.videoId)) {
-        run.alreadyPublished++;
-      } else {
-        const fe = feedEntryFromInnertube(ie, channelId);
-        const ok = await publishVideoEntry(channelCtx, published, archive, fe, 'short', shortsKind, relays, true);
-        if (ok) {
-          run.shortPublished++;
-          run.lastVideoId = ie.videoId;
-          run.lastVideoTitle = ie.title;
-        } else {
-          run.errors++;
-        }
-      }
+      longEntries = await enumerateChannelTab(itCtx, channelId, 'videos', { maxEntries });
+      run.longSeen = longEntries.length;
+      await flush();
     } catch (err) {
-      run.errors++;
-      console.warn(`backfill short ${ie.videoId} failed:`, err);
+      run.status = 'aborted';
+      run.abortReason = 'videos tab enumeration: ' + String(err);
+      await flush();
+      return;
     }
-    await persist();
-  }
 
-  run.phase = 'done';
-  run.status = 'done';
-  await persist();
+    run.phase = 'publishing-videos';
+    await flush();
+    for (const ie of longEntries) {
+      try {
+        if (await published.has(ie.videoId)) {
+          run.alreadyPublished++;
+        } else {
+          const fe = feedEntryFromInnertube(ie, channelId);
+          const ok = await publishVideoEntryPooled(channelCtx, published, archive, fe, 'long', shortsKind, pool, true);
+          if (ok) {
+            run.longPublished++;
+            run.lastVideoId = ie.videoId;
+            run.lastVideoTitle = ie.title;
+          } else {
+            run.errors++;
+          }
+        }
+      } catch (err) {
+        run.errors++;
+        console.warn(`backfill long ${ie.videoId} failed:`, err);
+      }
+      await tick();
+    }
+    await flush();
+
+    // ─── walk Shorts tab ────────────────────────────────────────────────
+    run.phase = 'innertube-shorts';
+    await flush();
+    let shortEntries: InnertubeEntry[] = [];
+    try {
+      shortEntries = await enumerateChannelTab(itCtx, channelId, 'shorts', { maxEntries });
+      run.shortSeen = shortEntries.length;
+      await flush();
+    } catch (err) {
+      run.status = 'aborted';
+      run.abortReason = 'shorts tab enumeration: ' + String(err);
+      await flush();
+      return;
+    }
+
+    run.phase = 'publishing-shorts';
+    await flush();
+    for (const ie of shortEntries) {
+      try {
+        if (await published.has(ie.videoId)) {
+          run.alreadyPublished++;
+        } else {
+          const fe = feedEntryFromInnertube(ie, channelId);
+          const ok = await publishVideoEntryPooled(channelCtx, published, archive, fe, 'short', shortsKind, pool, true);
+          if (ok) {
+            run.shortPublished++;
+            run.lastVideoId = ie.videoId;
+            run.lastVideoTitle = ie.title;
+          } else {
+            run.errors++;
+          }
+        }
+      } catch (err) {
+        run.errors++;
+        console.warn(`backfill short ${ie.videoId} failed:`, err);
+      }
+      await tick();
+    }
+    await flush();
+
+    run.phase = 'done';
+    run.status = 'done';
+    await flush();
+  } finally {
+    pool.close();
+  }
 }
 
 /**

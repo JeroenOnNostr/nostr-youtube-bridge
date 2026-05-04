@@ -192,3 +192,64 @@ export async function publishToRelays(event: NostrEvent, relayUrls: string[]): P
   );
   return accepted;
 }
+
+/**
+ * Pool of long-lived relay connections for batch publishing (backfill). Opens
+ * each relay once on demand, reuses the socket across many events, and drops
+ * relays that fail repeatedly so a single dead relay doesn't slow the rest.
+ */
+export class RelayPool {
+  private readonly relays = new Map<string, Relay>();
+  private readonly failures = new Map<string, number>();
+  private readonly maxFailures: number;
+
+  constructor(private readonly urls: string[], maxFailures = 3) {
+    this.maxFailures = maxFailures;
+  }
+
+  private async getOrConnect(url: string): Promise<Relay | null> {
+    const existing = this.relays.get(url);
+    if (existing) return existing;
+    if ((this.failures.get(url) ?? 0) >= this.maxFailures) return null;
+    try {
+      const relay = await withTimeout(Relay.connect(url), RELAY_OP_TIMEOUT_MS, `${url} connect`);
+      this.relays.set(url, relay);
+      return relay;
+    } catch (err) {
+      this.failures.set(url, (this.failures.get(url) ?? 0) + 1);
+      console.warn(`relay ${url} connect failed:`, err);
+      return null;
+    }
+  }
+
+  async publish(event: NostrEvent): Promise<number> {
+    let accepted = 0;
+    await Promise.all(
+      this.urls.map(async (url) => {
+        const relay = await this.getOrConnect(url);
+        if (!relay) return;
+        try {
+          await withTimeout(relay.publish(event), RELAY_OP_TIMEOUT_MS, `${url} publish`);
+          accepted++;
+          this.failures.set(url, 0);
+        } catch (err) {
+          const n = (this.failures.get(url) ?? 0) + 1;
+          this.failures.set(url, n);
+          console.warn(`relay ${url} rejected event ${event.id}:`, err);
+          if (n >= this.maxFailures) {
+            try { relay.close(); } catch { /* ignore */ }
+            this.relays.delete(url);
+          }
+        }
+      }),
+    );
+    return accepted;
+  }
+
+  close(): void {
+    for (const relay of this.relays.values()) {
+      try { relay.close(); } catch { /* ignore */ }
+    }
+    this.relays.clear();
+  }
+}
