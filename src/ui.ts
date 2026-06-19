@@ -84,7 +84,7 @@ export const INDEX_HTML = String.raw`<!doctype html>
 </header>
 <nav>
   <button data-tab="channels" class="active">Channels</button>
-  <button data-tab="preview">Preview / Publish</button>
+  <button data-tab="overview">Overview</button>
   <button data-tab="follow-pack">Follow Pack</button>
   <button data-tab="archive">Archive</button>
   <button data-tab="settings">Settings</button>
@@ -122,38 +122,21 @@ export const INDEX_HTML = String.raw`<!doctype html>
   </div>
 </section>
 
-<section class="tab" id="tab-preview">
-  <h2>Preview / Publish</h2>
+<section class="tab" id="tab-overview">
+  <h2>Overview</h2>
   <div class="card">
     <div class="row">
       <div class="grow">
         <label>Channel URL or UC… id</label>
-        <input type="text" id="preview-input" placeholder="https://www.youtube.com/@veritasium" />
-      </div>
-      <div>
-        <label>Long-form kind</label>
-        <select id="preview-long-kind" disabled title="NIP-71 only defines kind:21 for long-form video; addressable kind:34235 is not widely supported">
-          <option value="21">21 (NIP-71)</option>
-        </select>
-      </div>
-      <div>
-        <label>Shorts kind</label>
-        <select id="preview-shorts-kind">
-          <option value="22">22 (default)</option>
-          <option value="34236">34236 (addressable)</option>
-        </select>
-      </div>
-      <div>
-        <label>Limit per feed</label>
-        <input type="text" id="preview-limit" placeholder="(all)" style="width:80px" />
+        <input type="text" id="overview-input" placeholder="https://www.youtube.com/@veritasium" />
       </div>
       <div>
         <label>&nbsp;</label>
-        <button class="btn secondary" id="btn-preview">Preview</button>
+        <button class="btn secondary" id="btn-overview">Show</button>
       </div>
     </div>
     <p class="empty" style="text-align:left;padding:0;margin-top:8px">
-      YouTube RSS exposes only the most recent ~15 long-form and ~15 shorts per channel. The "limit per feed" caps how many of those the preview shows; it cannot reach further back into channel history.
+      Read-only view of every Nostr event the bridge has published for this channel, sourced from the local archive.
     </p>
     <h3 style="margin-top:16px">Relays</h3>
     <div class="relay-list" id="relay-list"></div>
@@ -162,7 +145,7 @@ export const INDEX_HTML = String.raw`<!doctype html>
       <button class="btn secondary" id="btn-add-relay">Add relay</button>
     </div>
   </div>
-  <div id="preview-result"></div>
+  <div id="overview-result"></div>
 </section>
 
 <section class="tab" id="tab-follow-pack">
@@ -175,17 +158,34 @@ export const INDEX_HTML = String.raw`<!doctype html>
       </div>
       <div class="grow">
         <label>d-tag (stable id)</label>
-        <input type="text" id="pack-dtag" placeholder="favorites-v1" />
+        <input type="text" id="pack-dtag" value="favorites-v1" placeholder="favorites-v1" />
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">
+          A short ID that identifies this pack. Reuse the same d-tag to update an existing pack; pick a new one (e.g. <code>kids-v1</code>) to publish a separate pack.
+        </div>
       </div>
     </div>
     <label style="margin-top:8px">Description</label>
     <textarea id="pack-description" placeholder="A pack of bridged YouTube channels."></textarea>
     <h3 style="margin-top:16px">Selected channels</h3>
     <div id="pack-channels"><div class="empty">go to Channels tab and tick some boxes…</div></div>
-    <h3 style="margin-top:16px">Bunker URL (NIP-46)</h3>
-    <div class="row">
-      <input type="text" id="bunker-url" class="grow" placeholder="bunker://npub…?relay=wss://…&secret=…" />
-      <button class="btn secondary" id="btn-save-bunker">Save</button>
+    <h3 style="margin-top:16px">Signing method</h3>
+    <div class="row" style="gap:16px">
+      <label style="display:flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--text)">
+        <input type="radio" name="signer-method" value="nip07" checked /> Browser extension (NIP-07)
+      </label>
+      <label style="display:flex;align-items:center;gap:6px;margin:0;font-size:13px;color:var(--text)">
+        <input type="radio" name="signer-method" value="nip46" /> Remote bunker (NIP-46)
+      </label>
+    </div>
+    <div id="signer-nip07" style="margin-top:8px;font-size:12px;color:var(--muted)">
+      Signs with <code>window.nostr</code> — works with Alby, nos2x, Flamingo, and other NIP-07 extensions. No setup needed.
+    </div>
+    <div id="signer-nip46" style="margin-top:8px;display:none">
+      <label>Bunker URL</label>
+      <div class="row">
+        <input type="text" id="bunker-url" class="grow" placeholder="bunker://npub…?relay=wss://…&secret=…" />
+        <button class="btn secondary" id="btn-save-bunker">Save</button>
+      </div>
     </div>
     <div class="row" style="margin-top:16px">
       <button class="btn" id="btn-pack-build">Build &amp; sign</button>
@@ -193,6 +193,19 @@ export const INDEX_HTML = String.raw`<!doctype html>
     </div>
     <h3 style="margin-top:16px">Event</h3>
     <pre id="pack-event">(no event yet)</pre>
+    <h3 style="margin-top:16px">Publish status</h3>
+    <div id="pack-publish-status" class="empty" style="text-align:left;padding:0">(not published yet)</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h3 style="margin:0">Published follow packs</h3>
+      <button class="btn secondary" id="btn-packs-refresh">Refresh</button>
+    </div>
+    <p class="empty" style="text-align:left;padding:0;margin-top:4px">
+      Pulled from the worker's archive. Edit reuses the same d-tag, so re-publishing replaces the existing pack on relays.
+    </p>
+    <div id="packs-list" style="margin-top:12px">(click refresh to load)</div>
   </div>
 </section>
 
@@ -369,7 +382,7 @@ document.querySelectorAll('nav button').forEach((b) => {
     document.querySelectorAll('section.tab').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
     document.getElementById('tab-' + b.dataset.tab).classList.add('active');
-    if (b.dataset.tab === 'follow-pack') renderPackChannels();
+    if (b.dataset.tab === 'follow-pack') { renderPackChannels(); loadPacksList(); }
   });
 });
 
@@ -411,7 +424,6 @@ async function loadConfig() {
     const c = await fetch('/admin/config').then((r) => r.json());
     document.getElementById('settings-relays').textContent = (c.defaultRelays || []).join('\\n');
     if (getRelays().length === 0) setRelays(c.defaultRelays || []);
-    document.getElementById('preview-shorts-kind').value = String(c.defaultShortsKind || 22);
     renderRelayList();
   } catch (e) { /* ignore */ }
 }
@@ -447,8 +459,8 @@ function renderChannels() {
       el('th', {}, ''),
       el('th', {}, 'Channel'),
       el('th', {}, 'npub'),
-      el('th', {}, 'Long'),
-      el('th', {}, 'Shorts'),
+      el('th', { title: 'Long-form videos already published as Nostr events for this channel' }, 'Long'),
+      el('th', { title: 'Shorts already published as Nostr events for this channel' }, 'Shorts'),
       el('th', {}, 'Last publish'),
       el('th', {}, 'Actions'),
     )));
@@ -474,8 +486,8 @@ function renderChannels() {
       el('td', {}, fmtTs(c.counts?.lastPublishedAt)),
       el('td', {},
         el('button', {
-          class: 'btn secondary', on: { click: () => { jumpToPreview(c.channelId); } },
-        }, 'Preview'),
+          class: 'btn secondary', on: { click: () => { jumpToOverview(c.channelId); } },
+        }, 'Overview'),
         ' ',
         (() => {
           const b = el('button', { class: 'btn secondary' }, 'Publish now');
@@ -513,7 +525,6 @@ async function publishNow(channelId, btn) {
       body: JSON.stringify({
         channelId,
         relayUrls: getRelays(),
-        shortsKind: parseInt(document.getElementById('preview-shorts-kind').value, 10),
       }),
     });
     toast('done: +' + r.published.longPublished + ' long, +' + r.published.shortPublished + ' short', 'ok');
@@ -671,18 +682,18 @@ document.getElementById('btn-add').addEventListener('click', async () => {
   } catch (e) { toast(e.message, 'error'); }
 });
 
-// ─── preview tab ────────────────────────────────────────────────────────
-function jumpToPreview(channelId) {
-  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === 'preview'));
-  document.querySelectorAll('section.tab').forEach((x) => x.classList.toggle('active', x.id === 'tab-preview'));
-  document.getElementById('preview-input').value = channelId;
-  doPreview();
+// ─── overview tab ───────────────────────────────────────────────────────
+function jumpToOverview(channelId) {
+  document.querySelectorAll('nav button').forEach((b) => b.classList.toggle('active', b.dataset.tab === 'overview'));
+  document.querySelectorAll('section.tab').forEach((x) => x.classList.toggle('active', x.id === 'tab-overview'));
+  document.getElementById('overview-input').value = channelId;
+  doOverview();
 }
 
-async function doPreview() {
-  const input = document.getElementById('preview-input').value.trim();
+async function doOverview() {
+  const input = document.getElementById('overview-input').value.trim();
   if (!input) return;
-  const root = document.getElementById('preview-result');
+  const root = document.getElementById('overview-result');
   root.innerHTML = '<div class="empty">resolving…</div>';
   let channelId;
   if (/^UC[\w-]{22}$/.test(input)) channelId = input;
@@ -693,25 +704,19 @@ async function doPreview() {
       channelId = r.channelId;
     } catch (e) { root.innerHTML = '<div class="empty">error: ' + e.message + '</div>'; return; }
   }
-  root.innerHTML = '<div class="empty">fetching feeds…</div>';
-  const limit = parseInt(document.getElementById('preview-limit').value, 10);
-  const shortsKind = parseInt(document.getElementById('preview-shorts-kind').value, 10);
+  root.innerHTML = '<div class="empty">loading published events…</div>';
   try {
-    const r = await api('/admin/preview', {
+    const r = await api('/admin/overview', {
       method: 'POST',
-      body: JSON.stringify({
-        channelId,
-        shortsKind,
-        limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
-      }),
+      body: JSON.stringify({ channelId }),
     });
-    renderPreview(r);
+    renderOverview(r);
   } catch (e) { root.innerHTML = '<div class="empty">error: ' + e.message + '</div>'; }
 }
-document.getElementById('btn-preview').addEventListener('click', doPreview);
+document.getElementById('btn-overview').addEventListener('click', doOverview);
 
-function renderPreview(p) {
-  const root = document.getElementById('preview-result');
+function renderOverview(p) {
+  const root = document.getElementById('overview-result');
   root.innerHTML = '';
   const card = el('div', { class: 'card' });
   const header = el('div', { class: 'row' });
@@ -719,88 +724,39 @@ function renderPreview(p) {
     el('strong', {}, p.channelTitle || p.channelId),
     el('div', { class: 'npub' }, p.channelId),
   ));
-  const allEntries = [
-    ...p.longEntries.map((e) => ({ ...e, classification: 'long' })),
-    ...p.shortEntries.map((e) => ({ ...e, classification: 'short' })),
-  ].sort((a, b) => b.publishedAtUnix - a.publishedAtUnix);
-  const fresh = allEntries.filter((e) => !e.alreadyPublished);
+  const entries = (p.entries || []).slice().sort((a, b) => b.publishedAtUnix - a.publishedAtUnix);
+  const longCount = entries.filter((e) => e.classification === 'long').length;
+  const shortCount = entries.length - longCount;
   header.appendChild(el('div', {},
-    el('div', {}, fresh.length + ' would publish'),
-    el('div', { class: 'npub' }, allEntries.length + ' total in feed'),
+    el('div', {}, entries.length + ' published'),
+    el('div', { class: 'npub' }, longCount + ' long, ' + shortCount + ' shorts'),
   ));
-  const btn = el('button', {
-    class: 'btn',
-    on: { click: () => publishSelected(p.channelId, getCheckedIds(), btn) },
-  }, 'Publish selected');
-  header.appendChild(btn);
   card.appendChild(header);
 
-  if (allEntries.length === 0) {
-    card.appendChild(el('div', { class: 'empty' }, 'no entries in feeds (channel may be empty or blocked).'));
+  if (entries.length === 0) {
+    card.appendChild(el('div', { class: 'empty' }, 'no published events for this channel yet — try Backfill or Publish now from the Channels tab.'));
     root.appendChild(card);
     return;
   }
   const tbl = el('table');
   tbl.appendChild(el('thead', {}, el('tr', {},
-    el('th', {}, ''),
     el('th', {}, 'Thumb'),
     el('th', {}, 'Title'),
     el('th', {}, 'Kind'),
     el('th', {}, 'Published'),
-    el('th', {}, 'Status'),
   )));
   const tbody = el('tbody');
-  for (const e of allEntries) {
-    const cb = el('input', { type: 'checkbox', 'data-vid': e.videoId });
-    cb.checked = !e.alreadyPublished;
-    cb.disabled = e.alreadyPublished;
-    const status = e.alreadyPublished
-      ? el('span', { class: 'pill dup' }, 'already published')
-      : el('span', { class: 'pill ' + e.classification }, 'will publish');
+  for (const e of entries) {
     tbody.appendChild(el('tr', {},
-      el('td', {}, cb),
       el('td', {}, el('img', { class: 'thumb', src: e.thumbnailUrl, loading: 'lazy' })),
       el('td', {}, el('a', { href: e.watchUrl, target: '_blank' }, e.title)),
       el('td', { class: 'kind-' + e.kind }, 'kind ' + e.kind + ' (' + e.classification + ')'),
       el('td', {}, fmtTs(e.publishedAtUnix)),
-      el('td', {}, status),
     ));
   }
   tbl.appendChild(tbody);
   card.appendChild(tbl);
   root.appendChild(card);
-
-  function getCheckedIds() {
-    return Array.from(tbl.querySelectorAll('input[type=checkbox]:checked')).map((c) => c.dataset.vid);
-  }
-}
-
-async function publishSelected(channelId, videoIds, btn) {
-  if (videoIds.length === 0) { toast('nothing selected'); return; }
-  const originalLabel = btn ? btn.textContent : '';
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = 'Publishing ' + videoIds.length + '…';
-  }
-  toast('publishing ' + videoIds.length + ' video(s) — this can take 30–90s while we wait for relays…', '', { sticky: true });
-  try {
-    const shortsKind = parseInt(document.getElementById('preview-shorts-kind').value, 10);
-    const r = await api('/admin/publish', {
-      method: 'POST',
-      body: JSON.stringify({
-        channelId,
-        videoIds,
-        shortsKind,
-        relayUrls: getRelays(),
-      }),
-    });
-    toast('done: +' + r.published.longPublished + ' long, +' + r.published.shortPublished + ' short', 'ok');
-    doPreview();
-    loadChannels();
-  } catch (e) { toast(e.message, 'error'); }
-  finally {
-    if (btn) { btn.disabled = false; btn.textContent = originalLabel; }
-  }
 }
 
 // ─── relay list ─────────────────────────────────────────────────────────
@@ -840,30 +796,123 @@ document.getElementById('btn-to-pack').addEventListener('click', () => {
   renderPackChannels();
 });
 
+// Inline picker open-state + search query, persisted across re-renders so
+// typing/searching doesn't get reset by every selection.
+let packPickerOpen = false;
+let packPickerQuery = '';
+
 function renderPackChannels() {
   const root = document.getElementById('pack-channels');
   root.innerHTML = '';
+
+  // Selected list (or empty hint).
   if (selectedForPack.size === 0) {
-    root.appendChild(el('div', { class: 'empty' }, 'go to Channels tab and tick some boxes.'));
+    root.appendChild(el('div', { class: 'empty' }, 'no channels yet — click "+ Add channels" below or tick boxes in the Channels tab.'));
+  } else {
+    const ul = el('table');
+    ul.appendChild(el('thead', {}, el('tr', {}, el('th', {}, 'Channel'), el('th', {}, 'npub'), el('th', {}))));
+    const tbody = el('tbody');
+    for (const id of selectedForPack) {
+      const c = lastChannels.find((x) => x.channelId === id);
+      const remove = el('button', {
+        class: 'btn secondary', on: { click: () => { selectedForPack.delete(id); renderPackChannels(); renderChannels(); } },
+      }, 'remove');
+      const title = c?.title || id;
+      tbody.appendChild(el('tr', {},
+        el('td', {}, title, el('div', { class: 'npub' }, id)),
+        el('td', {}, npubCell(c?.npub)),
+        el('td', {}, remove),
+      ));
+    }
+    ul.appendChild(tbody);
+    root.appendChild(ul);
+  }
+
+  // Add-channels affordance. Hidden when every bridged channel is already in.
+  const addable = lastChannels.filter((c) => !selectedForPack.has(c.channelId));
+  if (addable.length === 0 && lastChannels.length > 0) {
+    root.appendChild(el('div', { class: 'empty', style: 'margin-top:8px' }, 'all bridged channels are in this pack.'));
     return;
   }
-  const ul = el('table');
-  ul.appendChild(el('thead', {}, el('tr', {}, el('th', {}, 'Channel'), el('th', {}, 'npub'), el('th', {}))));
-  const tbody = el('tbody');
-  for (const id of selectedForPack) {
-    const c = lastChannels.find((x) => x.channelId === id);
-    const remove = el('button', {
-      class: 'btn secondary', on: { click: () => { selectedForPack.delete(id); renderPackChannels(); renderChannels(); } },
-    }, 'remove');
-    const title = c?.title || id;
-    tbody.appendChild(el('tr', {},
-      el('td', {}, title, el('div', { class: 'npub' }, id)),
-      el('td', {}, npubCell(c?.npub)),
-      el('td', {}, remove),
-    ));
+
+  const toggleBtn = el('button', {
+    class: 'btn secondary', style: 'margin-top:8px',
+    on: { click: () => { packPickerOpen = !packPickerOpen; renderPackChannels(); } },
+  }, packPickerOpen ? 'Close picker' : '+ Add channels');
+  root.appendChild(toggleBtn);
+
+  if (!packPickerOpen) return;
+
+  // Picker panel.
+  const panel = el('div', {
+    style: 'border:1px solid var(--border);border-radius:6px;padding:10px;margin-top:8px;background:var(--panel-2)',
+  });
+  const search = el('input', {
+    type: 'text', placeholder: 'Search by channel name or UC… id', class: 'grow',
+    style: 'margin-bottom:8px',
+  });
+  search.value = packPickerQuery;
+  search.addEventListener('input', () => {
+    packPickerQuery = search.value;
+    renderList();
+  });
+  panel.appendChild(search);
+
+  const listRoot = el('div', { style: 'max-height:300px;overflow-y:auto' });
+  panel.appendChild(listRoot);
+
+  function renderList() {
+    listRoot.innerHTML = '';
+    const q = packPickerQuery.trim().toLowerCase();
+    const matches = addable.filter((c) => {
+      if (!q) return true;
+      return (c.title || '').toLowerCase().includes(q)
+        || c.channelId.toLowerCase().includes(q);
+    });
+    if (matches.length === 0) {
+      listRoot.appendChild(el('div', { class: 'empty', style: 'text-align:left;padding:8px 0' },
+        q ? 'no matches.' : 'no addable channels.'));
+      return;
+    }
+    const tbl = el('table');
+    const tbody = el('tbody');
+    for (const c of matches) {
+      const addBtn = el('button', {
+        class: 'btn secondary',
+        on: { click: () => {
+          selectedForPack.add(c.channelId);
+          renderPackChannels();
+          renderChannels();
+        } },
+      }, 'add');
+      tbody.appendChild(el('tr', {},
+        el('td', {}, c.title || c.channelId, el('div', { class: 'npub' }, c.channelId)),
+        el('td', {}, npubCell(c.npub)),
+        el('td', { style: 'text-align:right' }, addBtn),
+      ));
+    }
+    tbl.appendChild(tbody);
+    listRoot.appendChild(tbl);
   }
-  ul.appendChild(tbody);
-  root.appendChild(ul);
+  renderList();
+
+  // Add-all-matching helper — useful when filtering down to a topical subset.
+  const addAll = el('button', {
+    class: 'btn secondary', style: 'margin-top:8px',
+    on: { click: () => {
+      const q = packPickerQuery.trim().toLowerCase();
+      for (const c of addable) {
+        if (!q || (c.title || '').toLowerCase().includes(q) || c.channelId.toLowerCase().includes(q)) {
+          selectedForPack.add(c.channelId);
+        }
+      }
+      renderPackChannels();
+      renderChannels();
+    } },
+  }, 'Add all visible');
+  panel.appendChild(addAll);
+
+  root.appendChild(panel);
 }
 
 document.getElementById('bunker-url').value = getBunker();
@@ -872,16 +921,32 @@ document.getElementById('btn-save-bunker').addEventListener('click', () => {
   toast('bunker URL saved', 'ok');
 });
 
+function getSignerMethod() {
+  const checked = document.querySelector('input[name="signer-method"]:checked');
+  return checked ? checked.value : 'nip07';
+}
+for (const r of document.querySelectorAll('input[name="signer-method"]')) {
+  r.addEventListener('change', () => {
+    const m = getSignerMethod();
+    document.getElementById('signer-nip07').style.display = m === 'nip07' ? '' : 'none';
+    document.getElementById('signer-nip46').style.display = m === 'nip46' ? '' : 'none';
+  });
+}
+
 document.getElementById('btn-pack-build').addEventListener('click', async () => {
   const name = document.getElementById('pack-name').value.trim();
   const dTag = document.getElementById('pack-dtag').value.trim();
   const description = document.getElementById('pack-description').value.trim();
   const channelIds = Array.from(selectedForPack);
+  const method = getSignerMethod();
   const bunker = document.getElementById('bunker-url').value.trim();
   if (!name) return toast('name required');
   if (!dTag) return toast('d-tag required');
   if (channelIds.length === 0) return toast('select at least one channel');
-  if (!bunker) return toast('bunker URL required');
+  if (method === 'nip07' && !window.nostr) {
+    return toast('no NIP-07 extension found — install Alby/nos2x or use NIP-46', 'error');
+  }
+  if (method === 'nip46' && !bunker) return toast('bunker URL required');
   const relays = getRelays();
   document.getElementById('pack-event').textContent = 'building template…';
   try {
@@ -893,20 +958,27 @@ document.getElementById('btn-pack-build').addEventListener('click', async () => 
       }),
     });
     if (!built.ok) { document.getElementById('pack-event').textContent = 'build failed'; return; }
-    document.getElementById('pack-event').textContent = 'connecting bunker…';
 
-    const parsed = await parseBunkerInput(bunker);
-    if (!parsed) { document.getElementById('pack-event').textContent = 'invalid bunker URL'; return; }
-    const localSk = generateSecretKey();
-    const pool = new SimplePool();
-    const signer = new BunkerSigner(localSk, parsed, { pool });
-    await signer.connect();
-    document.getElementById('pack-event').textContent = 'requesting signature…';
-    const pubkey = await signer.getPublicKey();
-    const tmpl = { ...built.event, pubkey };
-    const sig = await signer.signEvent(tmpl);
-    lastSignedPack = sig;
-    document.getElementById('pack-event').textContent = JSON.stringify(sig, null, 2);
+    let signedEvent;
+    if (method === 'nip07') {
+      document.getElementById('pack-event').textContent = 'requesting signature from extension…';
+      signedEvent = await window.nostr.signEvent(built.event);
+    } else {
+      document.getElementById('pack-event').textContent = 'connecting bunker…';
+      const parsed = await parseBunkerInput(bunker);
+      if (!parsed) { document.getElementById('pack-event').textContent = 'invalid bunker URL'; return; }
+      const localSk = generateSecretKey();
+      const pool = new SimplePool();
+      const signer = new BunkerSigner(localSk, parsed, { pool });
+      await signer.connect();
+      document.getElementById('pack-event').textContent = 'requesting signature…';
+      const pubkey = await signer.getPublicKey();
+      const tmpl = { ...built.event, pubkey };
+      signedEvent = await signer.signEvent(tmpl);
+    }
+
+    lastSignedPack = signedEvent;
+    document.getElementById('pack-event').textContent = JSON.stringify(signedEvent, null, 2);
     document.getElementById('btn-pack-publish').disabled = false;
     toast('signed ✓', 'ok');
   } catch (e) {
@@ -917,14 +989,120 @@ document.getElementById('btn-pack-build').addEventListener('click', async () => 
 
 document.getElementById('btn-pack-publish').addEventListener('click', async () => {
   if (!lastSignedPack) return;
+  const btn = document.getElementById('btn-pack-publish');
+  const statusEl = document.getElementById('pack-publish-status');
+  const relays = getRelays();
+  btn.disabled = true;
+  const prevLabel = btn.textContent;
+  btn.textContent = 'publishing…';
+  statusEl.innerHTML = relays.length
+    ? 'publishing to ' + relays.length + ' relay(s):<br/>' + relays.map(u => '• ' + u + ' — pending…').join('<br/>')
+    : 'publishing to default relays (configured on the worker)…';
   try {
     const r = await api('/admin/follow-pack/publish', {
       method: 'POST',
-      body: JSON.stringify({ event: lastSignedPack, relayUrls: getRelays() }),
+      body: JSON.stringify({ event: lastSignedPack, relayUrls: relays }),
     });
+    const lines = (r.results || []).map(res => {
+      const icon = res.ok ? '✓' : '✗';
+      const color = res.ok ? 'var(--ok)' : 'var(--bad)';
+      const detail = res.ok ? 'accepted' : (res.error || 'rejected');
+      return '<span style="color:' + color + '">' + icon + '</span> ' + res.url + ' — ' + detail;
+    });
+    statusEl.innerHTML =
+      '<div style="margin-bottom:8px">accepted by <b>' + r.accepted + '/' + r.relays.length + '</b> relay(s) at ' + new Date().toLocaleTimeString() + '</div>' +
+      lines.join('<br/>');
     toast('accepted by ' + r.accepted + '/' + r.relays.length + ' relays', r.accepted > 0 ? 'ok' : 'error');
-  } catch (e) { toast(e.message, 'error'); }
+  } catch (e) {
+    statusEl.innerHTML = '<span style="color:var(--bad)">error: ' + e.message + '</span>';
+    toast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+  }
 });
+
+// ─── published packs list ───────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => (
+    { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
+  ));
+}
+
+async function loadPacksList() {
+  const root = document.getElementById('packs-list');
+  root.innerHTML = '<div class="empty" style="text-align:left;padding:0">loading…</div>';
+  try {
+    const r = await api('/admin/follow-pack/list');
+    if (!r.ok) { root.innerHTML = '<div class="empty" style="text-align:left;padding:0;color:var(--bad)">load failed</div>'; return; }
+    if (!r.packs || r.packs.length === 0) {
+      root.innerHTML = '<div class="empty" style="text-align:left;padding:0">no packs archived yet — publish one above.</div>';
+      return;
+    }
+    root.innerHTML = '';
+    for (const pack of r.packs) {
+      const card = document.createElement('div');
+      card.style.cssText = 'border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:8px;background:var(--panel-2)';
+      const dateStr = new Date(pack.created_at * 1000).toLocaleString();
+      const knownChannels = pack.channels.filter(c => c.channelId);
+      const unknownCount = pack.channels.length - knownChannels.length;
+      const channelLines = pack.channels.map(c => {
+        if (c.channelId) {
+          return '• ' + escapeHtml(c.channelTitle || c.channelId) + ' <span style="color:var(--muted);font-size:11px">(' + escapeHtml(c.channelId) + ')</span>';
+        }
+        return '• <span style="color:var(--muted)">' + escapeHtml(c.pubkey.slice(0, 16)) + '… (not in this bridge\'s channel store)</span>';
+      }).join('<br/>');
+      card.innerHTML =
+        '<div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-weight:600;font-size:14px">' + escapeHtml(pack.title || '(untitled)') + '</div>' +
+            '<div style="color:var(--muted);font-size:12px;margin-top:2px">' +
+              'd-tag: <code>' + escapeHtml(pack.dTag) + '</code> · ' +
+              pack.channels.length + ' channel(s)' +
+              (unknownCount > 0 ? ' · <span style="color:var(--accent-2)">' + unknownCount + ' unknown</span>' : '') +
+              ' · published ' + escapeHtml(dateStr) +
+            '</div>' +
+            (pack.description ? '<div style="font-size:12px;margin-top:4px">' + escapeHtml(pack.description) + '</div>' : '') +
+          '</div>' +
+          '<button class="btn secondary" data-pack-edit="' + escapeHtml(pack.id) + '">Edit</button>' +
+        '</div>' +
+        '<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">Channels</summary>' +
+          '<div style="margin-top:6px;font-size:13px;line-height:1.6">' + channelLines + '</div>' +
+        '</details>';
+      root.appendChild(card);
+      const editBtn = card.querySelector('[data-pack-edit]');
+      editBtn.addEventListener('click', () => editPack(pack));
+    }
+  } catch (e) {
+    root.innerHTML = '<div class="empty" style="text-align:left;padding:0;color:var(--bad)">error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function editPack(pack) {
+  document.getElementById('pack-name').value = pack.title || '';
+  document.getElementById('pack-dtag').value = pack.dTag || '';
+  document.getElementById('pack-description').value = pack.description || '';
+  selectedForPack.clear();
+  let unknown = 0;
+  for (const c of pack.channels) {
+    if (c.channelId) selectedForPack.add(c.channelId);
+    else unknown++;
+  }
+  renderPackChannels();
+  renderChannels();
+  document.getElementById('pack-event').textContent = '(no event yet)';
+  document.getElementById('pack-publish-status').textContent = '(not published yet)';
+  document.getElementById('btn-pack-publish').disabled = true;
+  lastSignedPack = null;
+  document.getElementById('pack-name').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (unknown > 0) {
+    toast(unknown + ' channel(s) in this pack aren\'t in the bridge — they will be dropped on re-publish', 'error');
+  } else {
+    toast('loaded into form — edit and click Build & sign', 'ok');
+  }
+}
+
+document.getElementById('btn-packs-refresh').addEventListener('click', loadPacksList);
 
 // ─── archive / republish ────────────────────────────────────────────────
 async function loadArchiveStats() {

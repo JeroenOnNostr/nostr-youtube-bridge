@@ -21,6 +21,17 @@ id = "f19e7f1bbb2b4d7eabcf8847cf49a313"
 binding = "EVENTS"
 id = "3d9ae73b573e40768bf565d0ce0739df"
 
+# DVM listener — single Durable Object holding the long-lived relay subscription
+# for the search (5392) / watch (5393) job kinds. Poked on every cron tick (and
+# /admin/dvm/start) so it self-heals if evicted between ticks.
+[[durable_objects.bindings]]
+name = "DVM"
+class_name = "YouTubeDvm"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["YouTubeDvm"]
+
 [vars]
 RELAY_URLS = "wss://relay.kubo.watch,wss://relay.damus.io,wss://nos.lol,wss://relay.nostr.band"
 SHORTS_KIND = "22"

@@ -103,6 +103,28 @@ async function postBrowse(ctx: InnertubeContext, body: BrowseRequestBody): Promi
   return resp.json();
 }
 
+interface SearchRequestBody {
+  context: BrowseRequestBody['context'];
+  query: string;
+  params?: string;
+}
+
+async function postSearch(ctx: InnertubeContext, body: SearchRequestBody): Promise<unknown> {
+  const url = `https://www.youtube.com/youtubei/v1/search?key=${ctx.apiKey}`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: COMMON_HEADERS,
+    body: JSON.stringify(body),
+  });
+  if (resp.status === 429) throw new Error('youtube returned 429 — rate-limited');
+  if (!resp.ok) throw new Error(`youtube /search returned ${resp.status}`);
+  const ct = resp.headers.get('content-type') ?? '';
+  if (!ct.includes('application/json')) {
+    throw new Error('youtube /search returned non-JSON — likely a consent/bot wall');
+  }
+  return resp.json();
+}
+
 // ─── parsers ────────────────────────────────────────────────────────────
 
 interface RawItem {
@@ -394,6 +416,89 @@ export async function fetchChannelPicture(
     console.warn(`fetchChannelPicture for ${channelId} failed:`, err);
     return null;
   }
+}
+
+// ─── channel search ─────────────────────────────────────────────────────
+
+// Stable URL-safe base64 token that filters /search to channel results only
+// (the "Channel" type pill). Like the tab params above it doesn't depend on
+// the query; if YouTube ever rotates it, a logged-in /results?search_query=…
+// page exposes the current value next to the type filter.
+const SEARCH_CHANNELS_PARAMS = 'EgIQAg%3D%3D';
+
+export interface ChannelSearchResult {
+  channelId: string;
+  title: string;
+  /** Largest available avatar URL, https-normalized, or undefined if absent. */
+  thumbnail?: string;
+}
+
+interface ChannelRenderer {
+  channelId?: string;
+  title?: { simpleText?: string; runs?: Array<{ text?: string }> };
+  thumbnail?: { thumbnails?: ThumbnailEntry[] };
+}
+
+interface SearchResponse {
+  contents?: {
+    twoColumnSearchResultsRenderer?: {
+      primaryContents?: {
+        sectionListRenderer?: {
+          contents?: Array<{
+            itemSectionRenderer?: {
+              contents?: Array<{ channelRenderer?: ChannelRenderer }>;
+            };
+          }>;
+        };
+      };
+    };
+  };
+}
+
+export function extractChannelResults(json: unknown): ChannelSearchResult[] {
+  if (!json || typeof json !== 'object') return [];
+  const r = json as SearchResponse;
+  const sections =
+    r.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents ?? [];
+  const out: ChannelSearchResult[] = [];
+  const seen = new Set<string>();
+  for (const section of sections) {
+    const items = section.itemSectionRenderer?.contents ?? [];
+    for (const item of items) {
+      const cr = item.channelRenderer;
+      if (!cr?.channelId || !cr.channelId.startsWith('UC')) continue;
+      if (seen.has(cr.channelId)) continue;
+      seen.add(cr.channelId);
+      const title =
+        (cr.title?.simpleText ?? '') ||
+        (cr.title?.runs?.[0]?.text ?? '') ||
+        cr.channelId;
+      let thumbnail = pickLargest(cr.thumbnail?.thumbnails) ?? undefined;
+      if (thumbnail && thumbnail.startsWith('//')) thumbnail = `https:${thumbnail}`;
+      out.push({ channelId: cr.channelId, title, thumbnail });
+    }
+  }
+  return out;
+}
+
+/**
+ * Channel search via InnerTube /youtubei/v1/search with the channel-only type
+ * filter. Returns best-match-first ChannelSearchResults. The DVM search handler
+ * uses this for free-text queries; URL/@handle/UC-id queries go through
+ * resolveYouTubeUrl instead. Throws on bot walls / rate limits like postBrowse;
+ * the caller decides how to surface that (e.g. empty result array).
+ */
+export async function searchChannels(
+  ctx: InnertubeContext,
+  query: string,
+  limit = 8,
+): Promise<ChannelSearchResult[]> {
+  const json = await postSearch(ctx, {
+    context: buildContext(ctx),
+    query,
+    params: SEARCH_CHANNELS_PARAMS,
+  });
+  return extractChannelResults(json).slice(0, Math.max(1, limit));
 }
 
 function pushEntries(out: InnertubeEntry[], entries: ParsedEntry[], tab: 'videos' | 'shorts'): void {

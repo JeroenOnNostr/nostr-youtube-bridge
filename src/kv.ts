@@ -263,10 +263,14 @@ export class InnertubeContextStore {
 }
 
 /**
- * Per-run progress record for a long-running backfill. The handler returns
- * immediately with a runId; the worker continues via ctx.waitUntil and
- * updates this record as it walks the channel. The dashboard polls
- * GET /admin/backfill/:runId until status === 'done' or 'aborted'.
+ * Per-run progress record for a long-running backfill. Backfills are split
+ * across many short Worker invocations: each chunk runs for ~25s, persists
+ * progress, then self-triggers the next chunk via fetch(). The dashboard
+ * polls GET /admin/backfill/:runId until status === 'done' or 'aborted'.
+ *
+ * Chunking is invisible to the dashboard — `status` stays 'running' across
+ * the whole chain. The `cursor` and `resumeChain` fields are how a fresh
+ * invocation knows where to pick up.
  */
 export interface BackfillRun {
   runId: string;
@@ -285,9 +289,31 @@ export interface BackfillRun {
   /** Most recently published videoId, useful for the dashboard's live ticker. */
   lastVideoId?: string;
   lastVideoTitle?: string;
+  /**
+   * Where to resume on the next chunk. `tab` says which list we're walking;
+   * `index` is the position in that list of the next entry to process.
+   */
+  cursor?: { tab: 'videos' | 'shorts'; index: number };
+  /**
+   * Number of self-resume hops performed so far. Capped at MAX_RESUME_CHAIN
+   * (defined in index.ts) so a runaway can't quietly burn through CPU quota.
+   */
+  resumeChain: number;
+  /**
+   * Original kickoff parameter, preserved across hops so resume invocations
+   * apply the same ceiling that the kickoff did.
+   */
+  maxEntries: number;
+  /**
+   * Origin URL the kickoff request hit (e.g. "https://nostr-youtube-bridge.<acct>.workers.dev").
+   * Resume invocations fetch this same origin so the chain works regardless
+   * of custom domains or worker rename.
+   */
+  selfOrigin: string;
 }
 
 const BACKFILL_PREFIX = 'backfill:';
+const BACKFILL_ENTRIES_PREFIX = 'backfill-entries:';
 
 export class BackfillRunStore {
   constructor(private kv: KVNamespace) {}
@@ -302,6 +328,31 @@ export class BackfillRunStore {
    */
   async put(run: BackfillRun): Promise<void> {
     await this.kv.put(BACKFILL_PREFIX + run.runId, JSON.stringify(run), {
+      expirationTtl: 24 * 60 * 60,
+    });
+  }
+}
+
+/**
+ * Enumerated entry lists for a backfill. Written once by the first chunk
+ * after InnerTube enumeration finishes; read-only thereafter. Stored separately
+ * from BackfillRun so the small status record stays cheap to read on every
+ * dashboard poll (the entries blob can be hundreds of KB for big channels).
+ */
+export interface BackfillEntries {
+  long: { videoId: string; title: string; publishedAtApproxUnix: number; veryApproximate: boolean }[];
+  short: { videoId: string; title: string; publishedAtApproxUnix: number; veryApproximate: boolean }[];
+}
+
+export class BackfillEntriesStore {
+  constructor(private kv: KVNamespace) {}
+
+  async get(runId: string): Promise<BackfillEntries | null> {
+    return this.kv.get<BackfillEntries>(BACKFILL_ENTRIES_PREFIX + runId, 'json');
+  }
+
+  async put(runId: string, entries: BackfillEntries): Promise<void> {
+    await this.kv.put(BACKFILL_ENTRIES_PREFIX + runId, JSON.stringify(entries), {
       expirationTtl: 24 * 60 * 60,
     });
   }

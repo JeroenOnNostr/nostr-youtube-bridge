@@ -19,29 +19,30 @@ function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/**
- * Derive a deterministic Nostr secret key for a YouTube channel.
- *
- * Uses HKDF-SHA256 with:
- *   - ikm  = bridge master seed (32 bytes)
- *   - salt = "youtube:" + channel_id
- *   - info = "nostr-bridge-v1"
- *
- * Reduces mod n to land in the valid secp256k1 range. This is documented as
- * the canonical derivation in the bridge README so the mapping
- * (master_seed, channel_id) -> nsec is auditable and reproducible.
- */
-export function deriveChannelKey(masterSeedHex: string, channelId: string): {
+export interface DerivedKey {
   sk: Uint8Array;
   skHex: string;
   pkHex: string;
   npub: string;
   nsec: string;
-} {
+}
+
+/**
+ * Core HKDF-SHA256 derivation shared by deriveChannelKey and deriveServiceKey.
+ *
+ *   - ikm  = bridge master seed (32 bytes)
+ *   - salt = `saltPrefix` + `label`
+ *   - info = "nostr-bridge-v1"
+ *
+ * Reduces mod n to land in the valid secp256k1 range. The (master_seed,
+ * saltPrefix, label) -> nsec mapping is deterministic, auditable, and
+ * reproducible — documented as the canonical derivation in the bridge README.
+ */
+function deriveKey(masterSeedHex: string, saltPrefix: string, label: string): DerivedKey {
   const ikm = hexToBytes(masterSeedHex);
   if (ikm.length !== 32) throw new Error('BRIDGE_MASTER_SEED must be 32 bytes');
 
-  const salt = new TextEncoder().encode('youtube:' + channelId);
+  const salt = new TextEncoder().encode(saltPrefix + label);
 
   // HKDF expand to 32 bytes; reduce mod n to ensure validity.
   let candidate = hkdf(sha256, ikm, salt, HKDF_INFO, 32);
@@ -54,7 +55,7 @@ export function deriveChannelKey(masterSeedHex: string, channelId: string): {
   let counter = 0;
   while (value === 0n || value >= n) {
     counter++;
-    const altSalt = new TextEncoder().encode('youtube:' + channelId + ':' + counter);
+    const altSalt = new TextEncoder().encode(saltPrefix + label + ':' + counter);
     candidate = hkdf(sha256, ikm, altSalt, HKDF_INFO, 32);
     value = BigInt('0x' + bytesToHex(candidate));
     if (counter > 10) throw new Error('HKDF derivation failed');
@@ -67,4 +68,24 @@ export function deriveChannelKey(masterSeedHex: string, channelId: string): {
   const nsec = nip19.nsecEncode(sk);
 
   return { sk, skHex, pkHex, npub, nsec };
+}
+
+/**
+ * Derive a deterministic Nostr secret key for a YouTube channel. Per-channel
+ * keys sign the channel's video events (kind 21/22) and kind:0 profile only.
+ * Salt domain "youtube:" — must never collide with the DVM service salt.
+ */
+export function deriveChannelKey(masterSeedHex: string, channelId: string): DerivedKey {
+  return deriveKey(masterSeedHex, 'youtube:', channelId);
+}
+
+/**
+ * Derive the single bridge DVM service key. This is the identity that signs
+ * the DVM's result/status events (6392/6393/7000) and its NIP-89 kind-31990
+ * handler announcement — NOT a per-channel key. It uses a distinct salt domain
+ * ("dvm-service:") so it can never alias any channel's "youtube:<id>" key, even
+ * if a channel were ever named "service".
+ */
+export function deriveServiceKey(masterSeedHex: string): DerivedKey {
+  return deriveKey(masterSeedHex, 'dvm-service:', 'v1');
 }

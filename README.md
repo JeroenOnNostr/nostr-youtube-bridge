@@ -8,6 +8,30 @@ For each curated channel:
 - publishes new uploads as NIP-71 video events (kind:21 long-form, kind:22 shorts; kind:34236 optional via env flag)
 - publishes a kind:0 metadata profile so the bridged channel is discoverable in Nostr clients
 
+### Event shape — honest external-content references
+
+A bridged video is a real third-party (YouTube) watch page, not a Nostr-hosted
+video file. Earlier versions stuffed the watch URL into the `imeta` tag as
+`m text/html`, which abused NIP-71 (`imeta`/`m` describe a *hosted media
+variant*) and drew complaints from devs pulling kind-21/22 events. Each video
+event now describes itself honestly while staying kind-21/22 (so it remains
+visible in kind-filtered video feeds such as Kubo's):
+
+- **`title`** / **`published_at`** / **`alt`** — unchanged.
+- **`i` / `k` (NIP-73)** — `["i", "<watchUrl>", "<watchUrl>"]` + `["k", "web"]`
+  mark the event as *about* an external web resource.
+- **`r`** — the watch URL as a plain web link (NIP-71 `r` = links to web pages).
+- **`imeta` (NIP-92)** — `url <watchUrl>` (the seam clients use to detect &
+  embed the player) plus the thumbnail as the only media variant
+  (`image <thumb>`, `m image/jpeg`). **No `video/*` and no `text/html`** variant
+  is claimed, so a downstream "does this have a playable file?" check fails
+  cleanly and the event is trivial to include or exclude on purpose.
+
+The video kinds live behind `VIDEO_LONG_KIND` / `VIDEO_SHORT_KIND` in
+`publisher.ts`. **Decision: stay on kind 21/22** — moving to kind-1 would drop
+the events out of kind-filtered video feeds, which is the opposite of what we
+want. The `content` field is still the raw YouTube description, verbatim.
+
 ## Identity / key derivation
 
 ```
@@ -20,6 +44,14 @@ sk = HKDF-SHA256(
 ```
 
 Derivation reduces mod n if needed (overwhelmingly never). Same `(master_seed, channel_id)` always produces the same `nsec`. **The bridge retains custody indefinitely** — there is no claim/handoff flow. kind:0 metadata explicitly states the profile is bridge-operated.
+
+The **DVM service identity** (the key that signs job results 6392/6393/7000 and the NIP-89 kind-31990 handler announcement) is derived the same way but from a distinct salt domain so it can never alias a per-channel key:
+
+```
+sk = HKDF-SHA256(ikm = BRIDGE_MASTER_SEED, salt = "dvm-service:v1", info = "nostr-bridge-v1", length = 32)
+```
+
+Per-channel npubs sign the channel's *video* events; the single DVM service npub is what Kubo/users see as the YouTube service.
 
 ## Setup
 
